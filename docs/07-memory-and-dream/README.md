@@ -1,7 +1,7 @@
-# 07 - 记忆系统实战：Session、AutoCompact 与 Dream
+# 07 - 记忆系统实战
 
 > **阅读时间**：约 2 小时  
-> **前置知识**：[06 - 安装与上手](../06-current-source-setup/README.md)  
+> **前置知识**：[06 - 安装与上手](../06-install-and-hands-on/README.md)  
 > **学习目标**：深入理解 Nanobot 的双层记忆架构、MemoryConsolidator 压缩机制、会话管理，掌握面试高频考点
 
 ---
@@ -14,10 +14,10 @@
 
 - [7.1 为什么 Agent 需要记忆](#71-为什么-agent-需要记忆)
 - [7.2 记忆系统的挑战](#72-记忆系统的挑战)
-- [7.3 Nanobot 多层记忆架构](#73-nanobot-多层记忆架构)
+- [7.3 Nanobot 双层记忆架构](#73-nanobot-双层记忆架构)
 - [7.4 MEMORY.md —— 长期记忆](#74-memorymd--长期记忆)
-- [7.5 history.jsonl —— 历史时间线](#75-historyjsonl--历史时间线)
-- [7.6 AutoCompact、Consolidator 与 Dream](#76-autocompactconsolidator-与-dream)
+- [7.5 HISTORY.md —— 历史时间线](#75-historymd--历史时间线)
+- [7.6 MemoryConsolidator 压缩机制](#76-memoryconsolidator-压缩机制)
 - [7.7 短期记忆：Session 会话历史](#77-短期记忆session-会话历史)
 - [7.8 记忆系统完整数据流](#78-记忆系统完整数据流)
 - [7.9 记忆系统与其他框架对比](#79-记忆系统与其他框架对比)
@@ -122,391 +122,218 @@ Agent: 抱歉，我不知道你的名字，这是我们的第一次对话。
 
 ---
 
-## 7.3 Nanobot 多层记忆架构
+## 7.3 Nanobot current-source 记忆架构
 
-原版教程使用“MEMORY.md + HISTORY.md 双层记忆”解释早期 Nanobot。以 2026-09-24 current-source 为准，记忆链路已经变成：
+原版“MEMORY.md + HISTORY.md 双层记忆”是旧版实现。2026-09-24 current-source 应该分成四层：
 
-```text
-┌────────────────────────────────────────────────────────────┐
-│                 Current Model Context                      │
-│  本次 Provider 真正看到的 System + History + Current Input │
-└───────────────────────────▲────────────────────────────────┘
-                            │ ContextBuilder
-┌───────────────────────────┴────────────────────────────────┐
-│                  Session JSONL                             │
-│  结构化消息 / Tool Call / metadata / provider state         │
-└───────────────────────────┬────────────────────────────────┘
-                            │ AutoCompact / Consolidator
-┌───────────────────────────▼────────────────────────────────┐
-│              memory/history.jsonl                          │
-│  append-only 压缩历史，带 cursor / timestamp / content      │
-└───────────────────────────┬────────────────────────────────┘
-                            │ Dream
-┌───────────────────────────▼────────────────────────────────┐
-│  SOUL.md      USER.md       memory/MEMORY.md               │
-│  Agent规则     用户稳定信息      工作长期事实                │
-└────────────────────────────────────────────────────────────┘
+```
+Current Model Context
+        ↑
+Session JSONL
+        ↓
+AutoCompact / Consolidator
+        ↓
+memory/history.jsonl
+        ↓
+Dream
+        ↓
+SOUL.md / USER.md / memory/MEMORY.md
+        ↓
+下一次 ContextBuilder
 ```
 
-关键点：
+核心区别：
 
-- **Session** 不是 Long-term Memory，它首先服务 Conversation Replay 与 Recovery。
-- **AutoCompact / Consolidator** 负责把旧 Conversation 压缩、归档。
-- **history.jsonl** 保存“发生过什么”的长期来源，但不会每轮全量进入 Context。
-- **Dream** 从 History 中整理“真正值得继续保留什么”。
-- **SOUL / USER / MEMORY** 是经过整理的 durable state。
-
-> 💡 **面试要点**：模型表现出“记得”并不意味着模型参数发生更新，而是 Runtime 在新的 Context 中重新注入了持久化信息。
-
-### 关键设计决策
-
-为什么要拆成多层？
-
-```text
-Session Replay
-需要：结构完整、可恢复
-
-History Archive
-需要：便宜、追加、能长期积累
-
-Durable Memory
-需要：简洁、当前有效、可人工审计
-
-Current Context
-需要：只放当前任务真正有价值的信息
-```
-
-这四个目标冲突，所以不应该由一个无限增长的 MEMORY.md 解决全部问题。
+- **Context**：这一轮模型真正看到什么
+- **Session**：某个 conversation 的结构化 replay
+- **history.jsonl**：压缩后的长期历史来源
+- **SOUL/USER/MEMORY**：Dream 管理的 durable memory
 
 ---
 
-## 7.4 MEMORY.md —— 工作长期记忆
+## 7.4 MEMORY.md —— 长期记忆
 
 ### 7.4.1 存储位置
 
-```text
+```
 <agent-workspace>/memory/MEMORY.md
 ```
 
-### 7.4.2 文件内容适合什么
+### 7.4.2 作用
 
-current official memory model 中：
+保存跨 Session 有价值的长期事实，例如：
 
-- `USER.md`：用户是谁、稳定偏好是什么；
-- `MEMORY.md`：关于工作/项目“现在仍然成立”的事实；
-- `history.jsonl`：这些事情一路如何发生。
-
-例如：
-
-```markdown
-# Long-term Memory
-
-## ResearchPilot
-- Corpus 采用 document-aware retrieval。
-- Citation contract 必须保留 doc_id / page / chunk_id。
-- 当前评测集以 multi-paper query 为主。
-```
-
-不应该把每一次 retrieval result、每一条临时 Query 都永久写入 MEMORY.md。
+- 稳定项目背景
+- 重要长期决策
+- 持久约束
+- 需要长期保留的知识
 
 ### 7.4.3 注入方式
 
-`MemoryStore.get_memory_context()` 会把 MEMORY.md 转换为 Long-term Memory Context，ContextBuilder 决定何时加入模型输入。
+`MemoryStore.get_memory_context()` 将内容包装为 Long-term Memory Context，由 `ContextBuilder` 在后续 Turn 构造 Context。
 
-因此：
+### 7.4.4 为什么仍然使用可读文件
 
-```text
-MEMORY.md
-   ↓
-MemoryStore
-   ↓
-ContextBuilder
-   ↓
-Provider Context
-```
+优点仍然和原版教程相同：
 
-### 7.4.4 为什么仍然使用透明文件
+- 透明
+- 可编辑
+- 可版本化
+- 无额外向量数据库依赖
 
-优点仍然成立：
-
-- 可读；
-- 可编辑；
-- 可 Diff；
-- 易备份；
-- 不需要额外数据库。
-
-但 current-source 用文件并不等于“没有复杂状态”：Session、Provider State、History Archive、Dream Cursor 等仍然分别管理。
-
-### 7.4.5 MEMORY.md 的大小控制
-
-长期文件应该是 **curated state**，不是历史垃圾桶。
-
-好的 Memory 更新会：
-
-- 合并重复事实；
-- 修正冲突；
-- 删除已经失效的 ephemeral state；
-- 保留 durable project decision。
+但 current-source 又额外引入 GitStore，使 Dream 的自动修改可以审计和恢复。
 
 ---
 
-## 7.5 history.jsonl —— 历史时间线
+## 7.5 history.jsonl —— Consolidated History
 
 ### 7.5.1 存储位置
 
-```text
+```
 <agent-workspace>/memory/history.jsonl
 ```
 
-旧 `HISTORY.md` 现在主要作为 legacy migration 输入存在。
+### 7.5.2 数据形态
 
-### 7.5.2 JSONL 结构
+append-only JSONL，记录可包含：
 
-MemoryStore 为历史记录维护：
-
-```text
+```
 cursor
 timestamp
 content
-session_key（可选）
+session_key
 ```
 
-概念示例：
+### 7.5.3 与旧 HISTORY.md 的关系
 
-```json
-{"cursor": 17, "timestamp": "2026-09-24 10:30", "content": "...", "session_key": "websocket:..."}
+`HISTORY.md` 仍能在源码中看到，但主要用于 one-time legacy migration：
+
+```
+legacy HISTORY.md
+→ parse
+→ history.jsonl
+→ backup HISTORY.md
 ```
 
-### 7.5.3 核心特性
-
-- append-only；
-- cursor 自增；
-- 写入前清理模型内部 Think/模板泄露；
-- 对单条历史做 hard cap；
-- Dream 通过 `.dream_cursor` 记录处理进度；
-- 不会把完整 History 每轮塞给模型。
+因此 current 不能再把 HISTORY.md 当成主长期历史文件。
 
 ### 7.5.4 MEMORY.md vs history.jsonl
 
-| 维度 | MEMORY.md | history.jsonl |
+| 对比项 | MEMORY.md | history.jsonl |
 |---|---|---|
-| 含义 | 当前仍值得长期保留的工作事实 | 历史发生过程的压缩归档 |
-| 更新方式 | Dream 可重写/整理 | 追加 |
-| 每轮 Context | 可作为 Long-term Memory 注入 | 不全量注入 |
-| 可增长性 | 应保持精炼 | 可长期增长 |
-| 用途 | 当前决策上下文 | Dream / 过去事件检索 |
+| 语义 | 当前应长期记住什么 | 过去发生过什么的压缩历史 |
+| 组织 | 人类可读 Markdown | append-only JSONL |
+| 主要消费者 | ContextBuilder | Dream / Consolidation |
+| 是否每轮全量注入 | 可选择性注入 | 否 |
+| 是否直接编辑 | 可以谨慎编辑 | 通常不手工维护 |
 
 ---
 
-## 7.6 AutoCompact、Consolidator 与 Dream
+## 7.6 Consolidator 与 AutoCompact
 
-### 7.6.1 AutoCompact 触发
+### 7.6.1 AutoCompact
 
-current `AgentDefaults`：
+`nanobot/agent/autocompact.py` 检查 idle Session：
 
-```text
-idleCompactAfterMinutes = 15
-idleCompactCheckIntervalSeconds = 60
+```
+idle?
++ 有 unarchived message?
++ 没有 active turn?
+→ schedule compact
 ```
 
-AgentLoop 定期扫描 idle Session。满足：
+目的主要是 Context 管理，而不是删除完整 Session。
 
-- 已空闲达到 TTL；
-- 有尚未归档的消息；
-- 当前不是 active session；
-- 没有正在进行的 archive；
+### 7.6.2 Consolidator
 
-才会 schedule background compaction。
+`nanobot/agent/memory.py` 中的 Consolidator 复用：
 
-### 7.6.2 Consolidator 做什么
+- SessionManager
+- ContextBuilder.build_messages
+- Tool Definitions
+- Prompt Context Resolver
 
-`Consolidator` 接收：
+把较旧 conversation 总结/归档，并生成 Session Summary Checkpoint。
 
-- MemoryStore；
-- SessionManager；
-- ContextBuilder 的 message builder；
-- Tool definitions；
-- prompt context resolver。
+### 7.6.3 current 不再以 save_memory 虚拟工具为核心
 
-它负责把旧 Transcript 总结为：
+旧版 `save_memory` 机制不应继续作为新版面试答案。current 主链是：
 
-- Session summary/checkpoint；
-- history archive entry；
-- provider-compaction summary 等。
-
-### 7.6.3 Dream 取代旧 save_memory 虚拟工具
-
-旧教程描述：
-
-```text
-LLM 调 save_memory
-→ AgentRunner 内部拦截
-→ 写 MEMORY.md
 ```
-
-这不再是 current-source 的主要长期记忆机制。
-
-现在：
-
-```text
-Conversation
-→ Consolidator / history.jsonl
+Session
+→ Consolidation
+→ history.jsonl
 → Dream
-→ SOUL.md / USER.md / MEMORY.md
+→ durable files
 ```
-
-Dream 可以由 Gateway system job 调度，也可以通过命令手动触发。
-
-### 7.6.4 Dream 为什么需要 GitStore
-
-MemoryStore 为 durable memory 使用 GitStore。
-
-原因：
-
-```text
-自动模型写入
-→ 可能写错
-→ 必须能检查 Diff
-→ 必须能恢复
-```
-
-所以 current command 提供 Dream history/restore 能力。
-
-### 7.6.5 鲁棒性设计
-
-current MemoryStore 包含多个防御点：
-
-- legacy HISTORY.md migration 是 best-effort；
-- cursor allocation 与 append 使用锁；
-- oversized entry 截断；
-- Think/internal marker 清理；
-- durable file 使用原子写入；
-- Dream 使用 cursor 防止重复处理完整历史。
-
-### 7.6.6 压缩前后理解
-
-压缩不是“删掉用户原话然后只剩一个摘要”。
-
-正确理解：
-
-```text
-完整 Session persistence
-        ↓
-为了下一次模型 Context
-生成更小的 Summary / Archive
-        ↓
-减少 Token 成本与延迟
-```
-
-Model Context Optimization 与 Durable History Retention 是两件事。
 
 ---
 
 ## 7.7 短期记忆：Session 会话历史
 
-### 7.7.1 Session 的概念
+### 7.7.1 current Session
 
-Session 是 current-source 的近期 Conversation State。
+Session 不只是 user/assistant 文本，还可保存：
 
-默认位置：
+- Tool Call / Tool Result
+- Metadata
+- Provider Conversation State
+- Summary Checkpoint
+- Runtime Recovery State
+- Model Selection
+- Route
 
-```text
+### 7.7.2 默认路径
+
+```
 <config-dir>/sessions/<workspace-id>/*.jsonl
 ```
 
-### 7.7.2 JSONL 格式
+### 7.7.3 为什么 Session 与 Workspace Memory 分开
 
-Session 不只保存 User/Assistant Text，还可能保存：
-
-- Tool messages；
-- hidden history metadata；
-- automation marker；
-- summary checkpoint；
-- runtime checkpoint；
-- model preset metadata。
-
-### 7.7.3 _save_turn() / Persist Stage
-
-Runner 返回的是完整执行结果，但 AgentLoop 保存时要维护 **save boundary**，避免把旧 History 再次重复 Append。
-
-current Turn pipeline 中：
-
-```text
-run
-→ save
-→ respond
-```
-
-持久化与出站交付是独立阶段。
-
-### 7.7.4 关键处理细节
-
-current Session 还支持：
-
-- provider conversation state；
-- pending follow-up recovery；
-- per-session FIFO；
-- command messages 与 model-visible history 分离；
-- temporary/ephemeral policy。
-
-### 7.7.5 Session 加载与恢复
-
-SessionManager 管：
-
-- identity；
-- cache；
-- retention；
-- persistence。
-
-AgentLoop 的 restore stage 还可以恢复 runtime checkpoint 和 interrupted Turn。
-
-所以 current Session 已经接近一个轻量 conversation state store，而不只是聊天日志。
+Session 是 runtime conversation data；SOUL/USER/MEMORY 是 Agent-owned durable state。两者生命周期与访问边界不同。
 
 ---
 
-## 7.8 记忆系统完整数据流
+## 7.8 Dream 与完整数据流
 
-```text
-用户消息
-   ↓
-AgentLoop / Session
-   ↓
-ContextBuilder
-   ↓
-AgentRunner
-   ↓
-Assistant / Tool messages
-   ↓
-Persist Session JSONL
-   ↓
-Session idle
-   ↓
-AutoCompact
-   ↓
-Consolidator
-   ↓
-memory/history.jsonl + Session Summary
-   ↓
+### 7.8.1 Dream 做什么
+
+Dream 从新的 history archive 中整理长期信息，并更新：
+
+```
+SOUL.md
+USER.md
+memory/MEMORY.md
+```
+
+### 7.8.2 Dream Cursor
+
+`.dream_cursor` 记录已处理历史位置，避免每次从头回放全部长期 archive。
+
+### 7.8.3 GitStore
+
+Dream 更新的 durable files 有版本记录，可以通过 current Dream commands 查看和恢复。
+
+### 7.8.4 完整数据流
+
+```
+用户 Turn
+  ↓
+Session JSONL
+  ↓
+AutoCompact / Consolidator
+  ↓
+history.jsonl
+  ↓
 Dream
-   ↓
-SOUL.md / USER.md / MEMORY.md
-   ↓
-下一次 ContextBuilder 再注入
+  ↓
+SOUL / USER / MEMORY
+  ↓
+ContextBuilder
+  ↓
+新的 Model Context
 ```
-
-还有一个非常重要的分支：
-
-```text
-用户发现 Dream 写错
-   ↓
-/dream-log
-   ↓
-查看 Git history / Diff
-   ↓
-/dream-restore
-```
-
-这让自动长期记忆仍然保留人为控制。
 
 ## 7.9 记忆系统与其他框架对比
 
@@ -588,82 +415,59 @@ SOUL.md / USER.md / MEMORY.md
 
 ## 7.10 实战练习
 
-### 练习 1：观察 Session → AutoCompact → History
+### 练习 1：观察 Session 与 Context 压缩
 
-1. 在一个 Session 连续进行多轮 Tool-using 对话；
-2. 找到对应 Session JSONL；
-3. 临时把 idle compact threshold 调低用于实验；
-4. 保持 Gateway 运行；
-5. 等 Session idle 后观察 summary 与 `memory/history.jsonl`；
-6. 对比 compact 前后的下一次 Model Context。
+1. 在同一 Session 连续对话多轮。
+2. 打开 verbose 日志。
+3. 观察 Session JSONL。
+4. 等待/触发 compact。
+5. 检查 Session metadata/summary 与 `memory/history.jsonl`。
 
-记录：
+目标：理解“压缩模型 Context”与“删除原始持久化数据”不是一回事。
 
-```text
-Session message count
-history cursor
-summary text
-下一轮 prompt token
+### 练习 2：跨 Session Dream
+
+Session A 输入稳定信息：
+
+```
+我主要研究网络测量。
+论文回答时优先给证据与出处。
 ```
 
-### 练习 2：Dream 跨 Session 记忆
-
-Session A：
-
-```text
-我正在做 ResearchPilot。
-论文回答必须保留 doc_id/page/chunk_id。
-这是长期项目约束。
-```
-
-执行 Dream，然后检查：
-
-```text
-USER.md
-memory/MEMORY.md
-/dream-log
-```
-
-新建 Session B，确认模型能在合理场景下使用该长期信息。
+执行 current Dream 命令后，新建 Session B，验证是否可以从 USER/MEMORY 中恢复长期信息。
 
 ### 练习 3：错误长期记忆与恢复
 
-1. 故意让长期事实发生一次修改；
-2. 运行 Dream；
-3. 查看 Dream Git history；
-4. 验证错误影响；
-5. 用 restore 恢复；
-6. 再次验证 Context。
+故意加入一条错误稳定事实：
 
-> 这个实验比“能记住名字”更有面试价值，因为它展示了你理解自动记忆的审计与回滚。
+1. 运行 Dream；
+2. 查看 Dream Log / Git Diff；
+3. 修正或 Restore；
+4. 再次验证 Context。
+
+目标：理解为什么模型驱动的长期写入必须可审计。
 
 ## 7.11 面试高频题
 
-### 题目 1：Nanobot 的记忆系统是如何设计的？
+### 题目 1：Nanobot 的 current Memory System 怎么设计？
 
-> "current-source 不是 MEMORY.md + HISTORY.md 双文件。近期状态在 Session JSONL；idle Session 会通过 AutoCompact/Consolidator 做 Summary 与 Archive，长期历史进入 memory/history.jsonl；Dream 再从历史中整理 SOUL.md、USER.md 和 memory/MEMORY.md。下一轮由 ContextBuilder 选择性注入。Durable Memory 还有 GitStore 做审计和恢复。"
+> 四层：Current Context、Session、Consolidated history.jsonl、Dream-managed durable files。Session 负责 conversation replay，Consolidator/AutoCompact 负责旧上下文归档，Dream 负责长期 curated memory，ContextBuilder 再把需要的信息放回模型。
 
-### 题目 2：如何处理上下文窗口溢出？
+### 题目 2：AutoCompact 与 Dream 有什么区别？
 
-> "不能只做尾部截断。current Nanobot 会区分 Session persistence 与 Current Context，并通过 Context Governance、Tool Result 上限、AutoCompact、Transcript Summary 等手段控制 Context。长期历史不会全量注入。"
+> AutoCompact 主要解决 Session Context 太长；Dream 主要解决跨 Session 长期记忆整理。前者偏 Context Management，后者偏 Durable Memory Curation。
 
-### 题目 3：长期记忆与短期记忆的区别？
+### 题目 3：为什么 history.jsonl 不直接全部放进 Prompt？
 
-> "Session 追求可恢复的对话结构；Dream-managed USER/MEMORY 追求当前仍有效的稳定事实。History Archive 则处于中间层，保存过去发生过什么。"
+> 它会持续增长，而且“发生过”不等于“当前相关”。全量注入会增加 Token、延迟和干扰。
 
-### 题目 4：为什么不用向量数据库？
+### 题目 4：HISTORY.md 现在还有什么作用？
 
-> "Nanobot 的 durable profile/work state 规模通常不大，透明 Markdown + History JSONL 易于审计和编辑。向量库更适合大规模外部知识检索，例如我的 ResearchPilot 论文 Corpus。两者解决的不是同一个问题。"
+> current-source 中主要是 legacy migration 输入；新的长期历史主文件是 `memory/history.jsonl`。
 
-### 题目 5：如果让你改进 Nanobot 的记忆系统，你会怎么做？
+### 题目 5：为什么 Dream 使用 GitStore？
 
-可以从这些方向回答：
-
-- Memory provenance：记录每条长期事实来源；
-- Conflict detector：新旧事实冲突时要求显式 correction；
-- Sensitive-data policy：避免凭据进入 durable memory；
-- Eval：测跨 Session recall、stale-memory rate、false-memory rate；
-- Retrieval：当 history 超大时，为 history search 增加更系统的索引，而不是把所有历史塞 Prompt。
+> 自动模型写入长期状态存在误改和幻觉风险，需要 Diff、审计和恢复。
 
 ## 7.12 本章小结
 
@@ -707,4 +511,4 @@ MemoryConsolidator（压缩器）
 
 ---
 
-> **下一章**：[08 - 技能与工具](../08-skills-tools-plugins/README.md) —— 深入理解 Nanobot 的 Skill 系统和工具链
+> **下一章**：[08 - 技能与工具](../08-skills-and-tools/README.md) —— 深入理解 Nanobot 的 Skill 系统和工具链
