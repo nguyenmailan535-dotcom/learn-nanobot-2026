@@ -569,7 +569,7 @@ Channel
 #### Nanobot（本项目重点）
 
 **优势**：
-- 代码极简（~早期约 4000 行、current-source 已显著扩展），一个周末就能读完全部源码
+- 早期版本以极简著称；current-source 已明显产品化扩展，但 AgentLoop / AgentRunner / ContextBuilder / ToolRegistry / SessionManager 等核心边界仍然适合做源码学习
 - 架构清晰，非常适合学习 Agent 设计思想
 - MCP 原生支持，紧跟技术趋势
 - 多平台支持（微信、飞书、钉钉、Telegram 等），接地气
@@ -616,7 +616,7 @@ Channel
 
 ### 面试推荐说法
 
-> "我学习过多个 Agent 框架，重点研究了 Nanobot。选择 Nanobot 的原因有三：第一，它只有 早期约 4000 行、current-source 已显著扩展 Python 代码，便于深入理解 Agent 的核心设计思想，而不是被框架的复杂抽象所困扰；第二，它虽然轻量但五脏俱全——记忆系统、MCP 协议、多平台支持、子 Agent 机制一应俱全；第三，它是 2026 年的新项目，代表了 Agent 框架设计的最新趋势。"
+> "我学习过多个 Agent 框架，重点研究了 Nanobot current-source。选择它不是因为还只有几千行代码，而是因为它把 MessageBus、AgentLoop、AgentRunner、Context、Tool、Session、MCP 和 Automation 的职责边界做得比较直接。我按真实消息调用链做过源码追踪和最小实验，因此能从运行时角度解释 Agent，而不只是会调用框架 API。"
 
 ---
 
@@ -695,7 +695,7 @@ Channel
 
 ### 话术三：解释你选择学习 Nanobot 的原因
 
-> "我选择深入学习 Nanobot 框架，主要有三个原因。第一是'以小见大'，Nanobot 只有 早期约 4000 行、current-source 已显著扩展 Python 代码，但它的架构设计涵盖了消息总线、AgentLoop、记忆系统、MCP 协议支持、多平台适配等所有核心模块，非常适合深入理解 Agent 的设计思想。第二是技术前沿性，它原生支持 MCP 协议，这是 2024 年 Anthropic 提出的工具调用标准化协议，代表了 Agent 技术的最新方向。第三是实用性，它支持微信、飞书、钉钉等国内平台，我可以直接用它搭建实际可用的 AI 助手。"
+> "我选择深入学习 Nanobot，是因为它既保留了相对直接的 Runtime 结构，又已经覆盖真实产品会遇到的 Session durability、MCP、Skills/Plugins、Subagent、Automation、WebUI/Gateway 和安全边界。我重点学习的是这些可迁移的设计，而不是背某个版本的代码量。"
 
 ---
 
@@ -767,7 +767,7 @@ AI Agent 的核心三要素是 ______、______ 和 ______。
 请对比 Nanobot 和 LangChain 的设计哲学差异。提示：从代码量、架构风格、目标用户三个维度分析。
 
 > 思路：
-> - Nanobot：极简（早期约 4000 行、current-source 已显著扩展）、Workspace 为中心、个人开发者
+> - Nanobot：早期以极简著称；current-source 已产品化扩展，仍强调直接的 Runtime 边界与 Workspace-centered state
 > - LangChain：全面（50万行+）、抽象层丰富、企业开发者
 > - 核心差异：Nanobot 追求"够用就好"，LangChain 追求"无所不能"
 
@@ -790,7 +790,7 @@ AI Agent 的核心三要素是 ______、______ 和 ______。
 
 **7.** 你认为 AI Agent 目前面临的最大挑战是什么？（可靠性？安全性？成本？）
 
-**8.** 为什么 Nanobot 能用 早期约 4000 行、current-source 已显著扩展代码实现其他框架数万行甚至数十万行才能实现的功能？这说明了什么设计原则？
+**8.** Nanobot 从早期轻量框架发展到 current-source 后，哪些核心边界仍然保持清晰？这说明“代码量”与“架构可理解性”之间是什么关系？
 
 **9.** 如果 Agent 在执行任务的过程中做出了错误的决策（比如调用了错误的工具），Agent 系统应该如何处理？
 
