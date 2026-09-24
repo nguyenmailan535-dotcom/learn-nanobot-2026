@@ -127,7 +127,7 @@ LLM 只是一个"大脑"，它只能思考和说话。而 Agent 有"手"——�
 
 LLM 的"记忆"仅限于上下文窗口（如 128K tokens），窗口之外的信息就丢失了。Agent 有专门的记忆模块：
 - **短期记忆**：当前对话的上下文
-- **长期记忆**：跨会话持久化的信息（如 Nanobot 的 MEMORY.md）
+- **长期记忆**：跨会话持久化的信息（如 Nanobot 的 `USER.md` / `memory/MEMORY.md`）
 
 **3. Agent 能"自主决策循环"**
 
@@ -259,8 +259,8 @@ Agent 能对自己的行动结果进行评估和反思：
 ├──────────────────────────────────────────────┤
 │                                              │
 │  1. 文件存储（Nanobot 方案）                   │
-│     MEMORY.md → 结构化的长期记忆               │
-│     HISTORY.md → 完整的交互历史                │
+│     SOUL.md / USER.md / MEMORY.md → 经过 Dream 整理的长期记忆 │
+│     history.jsonl → 压缩后的长期历史来源                │
 │                                              │
 │  2. 向量数据库                                │
 │     存储 embedding，语义检索                   │
@@ -279,24 +279,29 @@ Agent 能对自己的行动结果进行评估和反思：
 
 #### Nanobot 的记忆系统（预览）
 
-Nanobot 采用了简洁而优雅的双文件记忆方案：
+以 **2026-09-24 的 HKUDS/nanobot `main`** 为准，Nanobot 已经不是旧教程里的 `MEMORY.md + HISTORY.md` 双文件模型，而是把不同生命周期的状态分开管理：
 
-```markdown
-# MEMORY.md（长期记忆）
-- 用户偏好：喜欢简洁回答，常用 Python
-- 项目信息：正在开发电商后台系统
-- 重要决策：数据库选择 PostgreSQL
-
-# HISTORY.md（交互历史）
-## 2026-04-01 10:30
-用户请求分析代码性能问题...
-Agent 使用 profiling 工具定位到瓶颈...
+```
+当前一次模型调用
+    ↑
+Session JSONL（结构化会话历史）
+    ↑
+AutoCompact / Consolidator（会话压缩与归档）
+    ↓
+memory/history.jsonl（append-only 历史归档）
+    ↓
+Dream（长期记忆整理）
+    ↓
+SOUL.md / USER.md / memory/MEMORY.md
 ```
 
-这种设计的优雅之处在于：
-- 完全透明，用户可以直接查看和编辑记忆文件
-- 无需额外的向量数据库等基础设施
-- 以 Workspace 为中心，自然隔离不同项目的记忆
+- **Session JSONL**：保存可恢复的对话、工具调用和 metadata。
+- **AutoCompact / Consolidator**：在会话空闲或上下文需要治理时生成摘要、归档历史。
+- **`memory/history.jsonl`**：长期历史来源，不会每轮全部注入模型。
+- **Dream**：从长期历史中整理真正需要跨会话保留的内容。
+- **`SOUL.md` / `USER.md` / `memory/MEMORY.md`**：分别保存 Agent 长期行为/人格、用户稳定信息和持续有效的工作记忆。
+
+> 💡 **面试要点**：不要再回答“Nanobot 用 MEMORY.md + HISTORY.md 做双层记忆”。新版应区分 Session、Compaction、History Archive 与 Dream-managed Durable Memory。
 
 ### 1.3.3 Tool Use（工具使用）
 
@@ -427,23 +432,36 @@ Final Answer: "Apple (AAPL) 当前股价 $245.32。
 
 ### ReAct 在 Nanobot 中的体现
 
-Nanobot 的 `AgentRunner` 本质上实现了 ReAct 循环：
+Nanobot current-source 中，ReAct 风格的 **model → tool → observation → model** 闭环主要由 `nanobot/agent/runner.py` 的 `AgentRunner` 承担，而 `AgentLoop` 负责一次面向用户/Channel 的 Turn 编排。
 
 ```python
-# 简化的 ReAct 循环（伪代码）
-for iteration in range(max_iterations):  # 最多 40 次
-    # Thought + Action: LLM 思考并决定行动
-    response = provider.chat_with_retry(messages)
-    
-    if response.has_tool_calls:
-        # Action: 执行工具调用
-        results = tool_registry.execute(response.tool_calls)
-        # Observation: 将结果加入对话历史
-        messages.append(tool_results_to_message(results))
-    else:
-        # 没有工具调用，说明 LLM 认为任务完成
-        break
+# 教学化伪代码：不是源码逐字复制
+messages = build_transcript()
+
+for _ in range(max_iterations):
+    response = await provider(...)
+    messages.append(response)
+
+    if not response.tool_calls:
+        return final_answer
+
+    tool_results = await tool_registry.execute(...)
+    messages.extend(tool_results)
 ```
+
+current-source 还会在这个基本闭环外处理：
+
+- streaming / reasoning events
+- provider conversation state
+- 并发 Tool Calls
+- Tool Result 长度治理
+- Context Compaction
+- mid-turn follow-up injection
+- checkpoint / cancellation
+
+默认 `agents.defaults.maxToolIterations` 在该学习快照中为 **200**，而且是可配置项，不应该把某个旧版本的固定迭代次数当成框架定义。
+
+> **关键理解**：ReAct 的工程本质是反馈闭环；是否把完整 Thought 文本暴露给应用层，不是判断系统有没有 ReAct 的标准。
 
 ### ReAct vs 其他范式对比
 
@@ -459,7 +477,7 @@ for iteration in range(max_iterations):  # 最多 40 次
 
 > **面试官问："请解释 ReAct 框架"**
 >
-> 回答："ReAct 是 Reasoning + Acting 的缩写，核心思想是让 AI Agent 在推理（Thought）和行动（Action）之间交替循环。每一轮，LLM 先根据当前状态进行推理（Thought），决定下一步该做什么；然后执行具体行动（Action），比如调用工具；接着观察行动结果（Observation）；再进入下一轮推理。这个循环持续进行，直到任务完成或达到最大迭代次数。Nanobot 的 AgentRunner 就是一个经典的 ReAct 循环实现，默认最多迭代 40 次。"
+> 回答："ReAct 是 Reasoning + Acting 的缩写，核心思想是让 AI Agent 在推理（Thought）和行动（Action）之间交替循环。每一轮，LLM 先根据当前状态进行推理（Thought），决定下一步该做什么；然后执行具体行动（Action），比如调用工具；接着观察行动结果（Observation）；再进入下一轮推理。这个循环持续进行，直到任务完成或达到最大迭代次数。Nanobot 的 AgentRunner 就是一个经典的 ReAct 循环实现，默认上限由 `agents.defaults.maxToolIterations` 配置（本快照默认 200）。"
 
 ---
 
@@ -523,20 +541,39 @@ for iteration in range(max_iterations):  # 最多 40 次
 
 ### 在 Nanobot 中的具体实现
 
+2026-09-24 current-source 的主链可以简化为：
+
 ```
-用户消息 → Channel(Telegram/Discord/...) → MessageBus(Inbound Queue)
-    → AgentLoop.run() 消费消息
-    → ContextBuilder 构建 system prompt + 历史消息
-    → AgentRunner 进入 ReAct 循环
-        → Provider(LLM) 生成响应
-        → ToolRegistry 执行工具调用
-        → 将结果加入消息列表
-        → 继续循环或结束
-    → MemoryStore 保存记忆
-    → MessageBus(Outbound Queue) → Channel → 用户
+用户/平台消息
+    ↓
+Channel
+    ↓
+MessageBus / InboundMessage
+    ↓
+AgentLoop
+    ↓
+restore → compact → command → build → run → save → respond
+                              ↓
+                        ContextBuilder
+                              ↓
+                         AgentRunner
+                         ↙       ↘
+                    Provider   ToolRegistry
+                         ↘       ↙
+                         Tool Result
+                              ↓
+                       AgentRunResult
+                              ↓
+                     OutboundMessage
 ```
 
----
+这里最重要的职责边界是：
+
+- **AgentLoop**：Session、Workspace、Context、Turn lifecycle、出站交付。
+- **ContextBuilder**：把 project instructions、agent profile/memory、skills、history 与当前输入组织成模型上下文。
+- **AgentRunner**：执行 provider/tool loop。
+- **ToolRegistry**：统一提供 model-callable Tool Schema 与执行入口。
+- **SessionManager**：保存结构化会话状态。
 
 ## 1.6 主流 Agent 框架对比
 
@@ -560,17 +597,14 @@ for iteration in range(max_iterations):  # 最多 40 次
 
 #### Nanobot（本项目重点）
 
-**优势**：
-- 代码极简（~4000 行），一个周末就能读完全部源码
-- 架构清晰，非常适合学习 Agent 设计思想
-- MCP 原生支持，紧跟技术趋势
-- 多平台支持（微信、飞书、钉钉、Telegram 等），接地气
-- MIT 开源，无商业限制
+**特点**：
+- 2026 年已经从早期“极简 Agent Demo”演化为完整的 self-hosted Agent Runtime
+- current-source 明确拆分 `AgentLoop` 与 `AgentRunner`
+- 内置 Session、AutoCompact、Dream、Skills、MCP、Subagent、Cron/Heartbeat、WebUI/Gateway、多 Channel
+- Tool、Channel、Provider 都有清晰的 Registry / Adapter / Composition Root 边界
+- 很适合按真实调用链学习 production Agent 工程问题
 
-**局限**：
-- 单 Agent 为主，多 Agent 协作能力有限
-- 生态不如 LangChain 丰富
-- 发布时间较短，社区还在成长
+**适合场景**：源码学习、个人/团队自托管 Agent、MCP/Plugin/多 Channel Runtime、需要长期状态和工具执行的 AI 应用。
 
 #### LangChain
 
@@ -687,9 +721,7 @@ for iteration in range(max_iterations):  # 最多 40 次
 
 ### 话术三：解释你选择学习 Nanobot 的原因
 
-> "我选择深入学习 Nanobot 框架，主要有三个原因。第一是'以小见大'，Nanobot 只有 4000 行 Python 代码，但它的架构设计涵盖了消息总线、AgentLoop、记忆系统、MCP 协议支持、多平台适配等所有核心模块，非常适合深入理解 Agent 的设计思想。第二是技术前沿性，它原生支持 MCP 协议，这是 2024 年 Anthropic 提出的工具调用标准化协议，代表了 Agent 技术的最新方向。第三是实用性，它支持微信、飞书、钉钉等国内平台，我可以直接用它搭建实际可用的 AI 助手。"
-
----
+> "我选择 Nanobot 不是因为它还是早期宣传里的‘4000 行小框架’，而是因为 current-source 已经覆盖了一个真实 Agent Runtime 的关键工程问题，同时核心边界仍然可追踪。我重点跟过 MessageBus → AgentLoop → ContextBuilder → AgentRunner → ToolRegistry → Session 的链路，还看了 MCPProvider、Dream、Subagent 和 Gateway 的生命周期。这样既能理解 Agent 的基本闭环，也能接触到并发、状态恢复、权限边界和可观测性等真实工程问题。"
 
 ## 1.9 面试常考点总结
 
@@ -728,7 +760,7 @@ for iteration in range(max_iterations):  # 最多 40 次
 
 **Q5: Agent 的记忆系统是怎么设计的？**
 
-> 核心回答思路：分为短期记忆（上下文窗口）和长期记忆（外部存储）。短期记忆利用 LLM 的上下文窗口，但容量有限；长期记忆需要外部存储方案，如 Nanobot 的文件系统方案（MEMORY.md），或者向量数据库方案。好的记忆系统需要解决信息存储、检索、压缩和更新等问题。
+> 核心回答思路：分为短期记忆（上下文窗口）和长期记忆（外部存储）。短期记忆利用 LLM 的上下文窗口，但容量有限；长期记忆需要外部存储方案，如 Nanobot 的 Session + Dream + `memory/MEMORY.md` 文件体系，或者向量数据库方案。好的记忆系统需要解决信息存储、检索、压缩和更新等问题。
 
 ---
 
@@ -759,7 +791,7 @@ AI Agent 的核心三要素是 ______、______ 和 ______。
 请对比 Nanobot 和 LangChain 的设计哲学差异。提示：从代码量、架构风格、目标用户三个维度分析。
 
 > 思路：
-> - Nanobot：极简（4000行）、Workspace 为中心、个人开发者
+> - Nanobot：current-source 以 Runtime 分层、Workspace/Session 为中心，兼顾本地与长期运行场景
 > - LangChain：全面（50万行+）、抽象层丰富、企业开发者
 > - 核心差异：Nanobot 追求"够用就好"，LangChain 追求"无所不能"
 
@@ -770,7 +802,7 @@ AI Agent 的核心三要素是 ______、______ 和 ______。
 - 如何处理记忆容量限制？
 - 如何在后续对话中检索相关记忆？
 
-> 思路提示：可以参考 Nanobot 的方案（虚拟工具 save_memory + MEMORY.md），也可以设计向量数据库方案。关键是要考虑"存什么"、"怎么存"、"怎么取"三个问题。
+> 思路提示：可以参考 Nanobot current-source 的方案（Session/Consolidator + Dream + USER/MEMORY），也可以设计向量数据库方案。关键是要考虑"存什么"、"怎么存"、"怎么取"三个问题。
 
 **6. 场景题**
 
@@ -782,7 +814,7 @@ AI Agent 的核心三要素是 ______、______ 和 ______。
 
 **7.** 你认为 AI Agent 目前面临的最大挑战是什么？（可靠性？安全性？成本？）
 
-**8.** 为什么 Nanobot 能用 4000 行代码实现其他框架数万行甚至数十万行才能实现的功能？这说明了什么设计原则？
+**8.** 为什么 Nanobot current-source 要把 `AgentLoop` 与 `AgentRunner` 拆开？这种职责分离解决了什么测试、复用和生命周期问题？
 
 **9.** 如果 Agent 在执行任务的过程中做出了错误的决策（比如调用了错误的工具），Agent 系统应该如何处理？
 
@@ -794,7 +826,7 @@ AI Agent 的核心三要素是 ______、______ 和 ______。
 
 准备好了吗？让我们进入下一章，深入了解 Nanobot 项目本身。
 
-➡️ [02 - Nanobot 项目概览](../02-nanobot-overview/README.md)
+➡️ [02 - Nanobot 项目概览](../02-nanobot-current-overview/README.md)
 
 ---
 
