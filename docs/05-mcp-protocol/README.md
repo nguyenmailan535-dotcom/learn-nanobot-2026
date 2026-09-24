@@ -776,13 +776,9 @@ MCP 生态发展时间线
 
 ### Q5: Nanobot 是如何集成 MCP 的？
 
-> "Nanobot 通过 MCPToolWrapper 类集成 MCP。具体流程分两个阶段：
-> 
-> **启动阶段**：框架读取 nanobot.yml 中的 mcp_servers 配置，为每个 MCP Server 建立连接（根据配置选择 stdio 或 HTTP 传输），然后调用 tools/list 获取该 Server 提供的工具列表，为每个工具创建一个 MCPToolWrapper 实例并注册到 ToolRegistry。
-> 
-> **运行阶段**：当 LLM 决定调用某个 MCP 工具时（通过 Function Calling），AgentRunner 像执行普通工具一样调用 MCPToolWrapper.run()，MCPToolWrapper 内部将调用转换为 MCP 的 tools/call 请求发送给 MCP Server，收到结果后返回给 AgentRunner。
-> 
-> 关键设计是 MCPToolWrapper 的 `_normalize_schema_for_openai` 方法，它处理了 MCP JSON Schema 和 OpenAI Function Calling 格式之间的差异，让 MCP 工具对 LLM 来说和内置工具完全透明。"
+> “current-source 把 MCP Connection 作为 application-owned infrastructure。Composition Root 创建 shared ToolRegistry 和 MCPProvider；MCPProvider 从 `config.json` 的 `tools.mcpServers` 以及 enabled Agent Plugins 收集 Server 配置，connect 后发现 Capability，并把允许的 MCP Tool 动态注册到同一个 ToolRegistry。AgentLoop/AgentRunner 使用这个 Registry，所以执行层不需要区分 Native Tool 和 MCP Tool。MCPProvider 还负责 reconnect/close 等连接生命周期。这个设计的关键不是某一个 Wrapper 类，而是 shared Registry + clear lifecycle ownership。”
+
+
 
 ### Q6: MCP 的 stdio 和 HTTP 传输有什么区别？
 
