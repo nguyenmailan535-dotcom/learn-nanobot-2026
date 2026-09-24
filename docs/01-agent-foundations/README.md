@@ -427,23 +427,32 @@ Final Answer: "Apple (AAPL) 当前股价 $245.32。
 
 ### ReAct 在 Nanobot 中的体现
 
-Nanobot 的 `AgentRunner` 本质上实现了 ReAct 循环：
+以 2026-09-24 的 HKUDS/nanobot `main`（`eb3fc07087074bf62030a5f2ed86f1ef0a2128fb`）为准，Nanobot 已经把“面向用户的一次 Turn”和“面向模型的工具循环”拆成了两层：
+
+```text
+AgentLoop
+  └─ 负责 session / workspace / context / delivery
+       ↓
+AgentRunner
+  └─ 负责 provider → tool → observation → provider 的循环
+```
+
+`AgentRunner` 的类注释就是：`Run a tool-capable LLM loop without product-layer concerns.`。核心循环仍然符合 ReAct 的工程形式，但不要把它理解成“打印 Thought 文本”：
 
 ```python
-# 简化的 ReAct 循环（伪代码）
-for iteration in range(max_iterations):  # 最多 40 次
-    # Thought + Action: LLM 思考并决定行动
-    response = provider.chat_with_retry(messages)
-    
-    if response.has_tool_calls:
-        # Action: 执行工具调用
-        results = tool_registry.execute(response.tool_calls)
-        # Observation: 将结果加入对话历史
-        messages.append(tool_results_to_message(results))
-    else:
-        # 没有工具调用，说明 LLM 认为任务完成
-        break
+# current-source 的概念化伪代码，不是逐行源码
+for iteration in range(max_iterations):
+    response = await provider.chat_stream_with_retry(...)
+
+    if response.tool_calls:
+        results = await execute_tools(response.tool_calls)
+        messages.extend(results)      # Observation
+        continue
+
+    return final_answer
 ```
+
+当前 `AgentDefaults.max_tool_iterations` 的默认值是 **200**，而不是早期教程中的 40。它是运行时上限，不表示正常任务应该跑满 200 轮；实际还会受到 stop reason、provider error、cancellation、context governance 等条件影响。
 
 ### ReAct vs 其他范式对比
 
@@ -459,7 +468,7 @@ for iteration in range(max_iterations):  # 最多 40 次
 
 > **面试官问："请解释 ReAct 框架"**
 >
-> 回答："ReAct 是 Reasoning + Acting 的缩写，核心思想是让 AI Agent 在推理（Thought）和行动（Action）之间交替循环。每一轮，LLM 先根据当前状态进行推理（Thought），决定下一步该做什么；然后执行具体行动（Action），比如调用工具；接着观察行动结果（Observation）；再进入下一轮推理。这个循环持续进行，直到任务完成或达到最大迭代次数。Nanobot 的 AgentRunner 就是一个经典的 ReAct 循环实现，默认最多迭代 40 次。"
+> 回答："ReAct 是 Reasoning + Acting 的缩写，核心思想是让 AI Agent 在推理（Thought）和行动（Action）之间交替循环。每一轮，LLM 先根据当前状态进行推理（Thought），决定下一步该做什么；然后执行具体行动（Action），比如调用工具；接着观察行动结果（Observation）；再进入下一轮推理。这个循环持续进行，直到任务完成或达到最大迭代次数。Nanobot 的 AgentRunner 就是一个工具驱动的 ReAct 式执行循环；2026-09-24 current-source 的 `AgentDefaults.max_tool_iterations` 默认值为 200。"
 
 ---
 
@@ -523,20 +532,36 @@ for iteration in range(max_iterations):  # 最多 40 次
 
 ### 在 Nanobot 中的具体实现
 
-```
-用户消息 → Channel(Telegram/Discord/...) → MessageBus(Inbound Queue)
-    → AgentLoop.run() 消费消息
-    → ContextBuilder 构建 system prompt + 历史消息
-    → AgentRunner 进入 ReAct 循环
-        → Provider(LLM) 生成响应
-        → ToolRegistry 执行工具调用
-        → 将结果加入消息列表
-        → 继续循环或结束
-    → MemoryStore 保存记忆
-    → MessageBus(Outbound Queue) → Channel → 用户
+2026-09-24 current-source 的实际主链已经比早期版本更清晰地分层：
+
+```text
+用户消息
+→ Channel / WebUI / CLI
+→ MessageBus(InboundMessage)
+→ AgentLoop
+    → 确定 session / project workspace
+    → restore / compact / command / build
+    → ContextBuilder 组装 TranscriptInput
+    → AgentRunner.run(AgentRunSpec)
+        → Provider 生成响应
+        → ToolRegistry 执行 Tool Call
+        → Tool Result 回填
+        → 继续模型循环，直到完成/错误/达到上限
+    → save
+    → respond
+→ MessageBus / TurnDelivery
+→ Channel
+→ 用户
 ```
 
----
+长期状态也不再可以概括成“每轮直接 MemoryStore 保存记忆”。当前实现区分：
+
+- Session JSONL：近程会话与可恢复运行状态；
+- AutoCompact / Consolidator：长会话压缩与归档；
+- `memory/history.jsonl`：压缩历史；
+- Dream：把值得长期保留的信息整理进 `SOUL.md`、`USER.md`、`memory/MEMORY.md`。
+
+这个分层会在第 3、4、7 章展开。
 
 ## 1.6 主流 Agent 框架对比
 
@@ -546,12 +571,12 @@ for iteration in range(max_iterations):  # 最多 40 次
 |------|-------------|---------------|------------|-------------|--------------|
 | **开发者** | 香港大学 HKUDS | Harrison Chase | João Moura | Toran Richards | 清华系团队 |
 | **语言** | Python | Python/JS | Python | Python | Python |
-| **代码量** | ~4,000 行 | ~50 万行 | ~3 万行 | ~10 万行 | ~43 万行 |
-| **GitHub Stars** | 37K+ | 100K+ | 25K+ | 170K+ | 15K+ |
+| **代码量** | 早期约 4,000 行；2026 current-source 已扩展为完整自托管 Runtime | ~50 万行 | ~3 万行 | ~10 万行 | ~43 万行 |
+| **GitHub Stars** | 48.5K+（2026-09-24） | 100K+ | 25K+ | 170K+ | 15K+ |
 | **核心定位** | 超轻量级个人 Agent | Agent 开发框架/工具链 | 多 Agent 协作 | 自主通用 AI | 全栈 Agent 平台 |
 | **MCP 支持** | 原生支持 | 通过扩展 | 有限 | 无原生支持 | 支持 |
-| **记忆系统** | 文件系统(MEMORY.md) | 多种后端 | 内置 | 内置 | 多模态记忆 |
-| **多平台** | 8+ 平台 | 需自行集成 | 无 | Web UI | 有限 |
+| **记忆系统** | Session + history.jsonl + Dream(MEMORY/SOUL/USER) | 多种后端 | 内置 | 内置 | 多模态记忆 |
+| **多平台** | WebUI + 多种 Chat Apps（插件式 Channel） | 需自行集成 | 无 | Web UI | 有限 |
 | **学习曲线** | 低 | 高 | 中 | 中 | 高 |
 | **适用场景** | 个人助理/小团队 | 复杂 AI 应用 | 多Agent协作 | 自主任务 | 企业级 |
 | **首次发布** | 2026年2月 | 2022年10月 | 2023年12月 | 2023年3月 | 2025年 |
@@ -561,7 +586,7 @@ for iteration in range(max_iterations):  # 最多 40 次
 #### Nanobot（本项目重点）
 
 **优势**：
-- 代码极简（~4000 行），一个周末就能读完全部源码
+- 仍强调小而可读的核心，但 current-source 已明显超过早期“约 4000 行”的教学快照；更适合按主链和模块边界阅读
 - 架构清晰，非常适合学习 Agent 设计思想
 - MCP 原生支持，紧跟技术趋势
 - 多平台支持（微信、飞书、钉钉、Telegram 等），接地气
@@ -608,7 +633,7 @@ for iteration in range(max_iterations):  # 最多 40 次
 
 ### 面试推荐说法
 
-> "我学习过多个 Agent 框架，重点研究了 Nanobot。选择 Nanobot 的原因有三：第一，它只有 4000 行 Python 代码，便于深入理解 Agent 的核心设计思想，而不是被框架的复杂抽象所困扰；第二，它虽然轻量但五脏俱全——记忆系统、MCP 协议、多平台支持、子 Agent 机制一应俱全；第三，它是 2026 年的新项目，代表了 Agent 框架设计的最新趋势。"
+> "我学习过多个 Agent 框架，重点研究了 Nanobot。选择 Nanobot 的原因有三：第一，它仍然保持较清晰的 AgentLoop / AgentRunner / ToolRegistry / ContextBuilder 边界，适合按调用链深入源码；第二，current-source 已覆盖 Session、Dream、MCP、Plugins、WebUI、Channels、Subagent、Automation 等真实运行时能力；第三，它是 2026 年仍在快速演进的项目，所以我会固定 commit 做源码学习，而不是背早期版本的实现细节。"
 
 ---
 
@@ -649,7 +674,7 @@ for iteration in range(max_iterations):  # 最多 40 次
 2026
 ├── 01月  Agent 成为 AI 应用主流范式
 ├── 02月  HKUDS/nanobot 发布 ← 我们学习的项目
-│         → 超轻量级 Agent 框架，迅速获得 37K+ Stars
+│         → 超轻量级 Agent 框架，迅速获得 48.5K+ Stars
 ├── 03月  MCP 生态全面成熟
 │         → 各类 MCP Server 生态丰富
 └── 04月  你正在学习本指南！
