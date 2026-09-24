@@ -584,50 +584,18 @@ Web Fetch 与 HTTP/SSE MCP 使用网络安全检查；如确需访问私有目�
 
 ## 8.13 本章小结
 
-### 核心架构图
-
-```
-┌────────────────────────────────────────────────────────────┐
-│                    Nanobot 工具与技能体系                    │
-│                                                            │
-│  ┌─── Skills 层 ───────────────────────────────────────┐   │
-│  │  SKILL.md × N                                       │   │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐            │   │
-│  │  │ github   │ │ weather  │ │ 自定义    │ ...        │   │
-│  │  └──────────┘ └──────────┘ └──────────┘            │   │
-│  │  渐进披露：Tier1(摘要) → Tier2(全文) → Tier3(脚本)  │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                            │
-│  ┌─── ToolRegistry ───────────────────────────────────┐   │
-│  │                                                     │   │
-│  │  内置工具              MCP 工具                     │   │
-│  │  ┌─────────┐          ┌──────────────┐             │   │
-│  │  │read_file│          │MCPToolWrapper│             │   │
-│  │  │exec     │          │  mcp_xxx     │             │   │
-│  │  │web_*    │          │  mcp_yyy     │             │   │
-│  │  │message  │          └──────────────┘             │   │
-│  │  │cron     │                                       │   │
-│  │  │spawn    │                                       │   │
-│  │  └─────────┘                                       │   │
-│  │                                                     │   │
-│  │  统一接口: register() / get_definitions() / execute()│  │
-│  └─────────────────────────────────────────────────────┘   │
-└────────────────────────────────────────────────────────────┘
-```
-
-### 面试记忆清单
-
-| 考点 | 一句话回答 |
-|------|-----------|
-| Skill vs Tool | Skill 是能力说明书（Markdown），Tool 是具体操作（代码） |
-| SKILL.md 格式 | YAML Frontmatter + Markdown 正文 |
-| 渐进披露 | 三层：摘要目录 → 全文读取 → 脚本/参考 |
-| 技能发现 | workspace/skills/ 优先，同名覆盖内置 |
-| ToolRegistry | 统一注册与执行所有工具（内置 + MCP） |
-| MCPToolWrapper | 将 MCP 工具转换为内置格式 |
-| 安全机制 | restrict_to_workspace + 危险命令拒绝 + SSRF 防护 |
-| always 字段 | true=全文注入，false=仅摘要（默认） |
+| 考点 | current-source 要点 |
+|---|---|
+| Skill vs Tool | Skill 是 instruction capability；Tool 是 executable capability |
+| SKILL.md | YAML Frontmatter + Markdown 正文 |
+| Discovery | Workspace → Enabled Agent Plugin → Built-in |
+| Progressive Loading | Summary 优先，按需加载全文；支持 `$skill-name` 显式激活 |
+| ToolLoader | 发现/构造/注册 Tool |
+| ToolRegistry | 统一 Definitions、Lookup、Execute |
+| MCP | MCPProvider 动态注册到共享 ToolRegistry |
+| Agent Plugin | 可打包 Skill + MCP，并要求显式 Enable / 校验 |
+| 安全 | `tools.restrictToWorkspace`、exec sandbox、SSRF、MCP enabledTools |
 
 ---
 
-> **下一章**：[09 - 多平台接入](../09-multi-platform/README.md) —— 了解 Nanobot 如何同时接入 Telegram、Discord、飞书、钉钉等 8+ 平台
+> **下一章**：[09 - 多平台接入](../09-multi-platform/README.md)
