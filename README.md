@@ -165,16 +165,16 @@ learn-nanobot-2026/
 
 如果目标是尽快找实习，不需要等全部学完再投。
 
-- Day 1-2：03/04 current-source 调用链；
-- Day 3：06 runtime/config/workspace/session；
-- Day 4：07 memory + Dream；
-- Day 5：08 Skill / Plugin；
-- Day 6：09 MCP；
-- Day 7：10 Gateway / Channel / Subagent / Automation；
-- Day 8-11：12 Research Agent Capstone；
-- Day 12：Eval / Bad Case / 指标；
-- Day 13：部署 / Security / Observability；
-- Day 14：简历、README、集中投递。
+- Day 1-2：01-04 Agent 基础 + current-source 主调用链；
+- Day 3：05 MCP；
+- Day 4：06 runtime / config / workspace / session；
+- Day 5：07 Memory + Dream；
+- Day 6：08 Skills / Tools / Agent Plugins；
+- Day 7：09 Channels / MessageBus / Session isolation；
+- Day 8：10 Subagent / Cron / Heartbeat；
+- Day 9：11 Security / Deploy / Observability；
+- Day 10-13：12 ResearchPilot Capstone + Eval / Bad Case；
+- Day 14：13-14 面试与岗位映射，更新简历并集中投递。
 
 ## 重要：不要抄简历数字
 
