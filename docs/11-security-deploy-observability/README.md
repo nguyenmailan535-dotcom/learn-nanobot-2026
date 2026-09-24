@@ -72,240 +72,71 @@ AI Agent：
 
 ## 11.2 Nanobot 安全机制详解
 
-### 11.2.1 restrict_to_workspace：文件与Shell操作沙箱
+### 11.2.1 Workspace Access Boundary
 
-这是 Nanobot 最核心的安全机制——**将所有文件和命令操作限制在 workspace 目录内**：
-
-```python
-class WorkspaceGuard:
-    """workspace 安全边界守卫"""
-    
-    def __init__(self, workspace: str):
-        self.workspace = os.path.abspath(workspace)
-    
-    def validate_path(self, path: str) -> str:
-        """验证路径是否在 workspace 内"""
-        # 解析绝对路径（处理 ../ 等相对路径）
-        abs_path = os.path.abspath(
-            os.path.join(self.workspace, path)
-        )
-        
-        # 检查是否在 workspace 内
-        if not abs_path.startswith(self.workspace + os.sep):
-            if abs_path != self.workspace:
-                raise PermissionError(
-                    f"Access denied: '{path}' is outside workspace "
-                    f"'{self.workspace}'"
-                )
-        
-        return abs_path
-    
-    def validate_command(self, command: str):
-        """验证 Shell 命令的工作目录"""
-        # exec 工具的 cwd 被强制设置为 workspace
-        # 即使命令中使用 cd，也始终从 workspace 开始
-        pass
-```
-
-**限制范围**：
-
-| 操作 | 受限方式 |
-|------|---------|
-| `read_file` | 路径必须在 workspace 内 |
-| `write_file` | 路径必须在 workspace 内 |
-| `edit_file` | 路径必须在 workspace 内 |
-| `list_dir` | 路径必须在 workspace 内 |
-| `exec` | 工作目录（cwd）强制设为 workspace |
-
-**防御路径遍历攻击**：
+current 配置：
 
 ```
-攻击尝试：
-read_file("../../etc/passwd")
-  → 拼接: workspace + "/../../etc/passwd"
-  → 解析: /etc/passwd
-  → 检查: /etc/passwd 不以 workspace 开头
-  → 拒绝: PermissionError!
-
-read_file("/etc/passwd")
-  → 绝对路径不以 workspace 开头
-  → 拒绝: PermissionError!
-
-read_file("./safe/../../etc/passwd")
-  → 解析: /etc/passwd
-  → 拒绝: PermissionError!
+tools.restrictToWorkspace
 ```
 
-### 11.2.2 exec 工具的危险模式拒绝
+这是应用层 Workspace Guard。文件 Tool 与 Shell Working Directory 结合 Effective Project Workspace 做路径边界控制。
 
-exec 工具内置了危险命令检测：
+> 它不是 OS Sandbox，因此不要把“限制路径”与“进程级隔离”混为一谈。
 
-```python
-DANGEROUS_PATTERNS = [
-    # 系统破坏类
-    (r"rm\s+(-[rf]+\s+)?/(?!\w)", "删除根目录文件"),
-    (r"mkfs\.", "格式化磁盘"),
-    (r"dd\s+if=", "磁盘级写入"),
-    (r">\s*/dev/sd", "写入磁盘设备"),
-    
-    # 权限修改类
-    (r"chmod\s+(-R\s+)?777\s+/", "全局权限修改"),
-    (r"chown\s+-R\s+.*\s+/", "全局所有者修改"),
-    
-    # 网络风险类
-    (r"curl\s+.*\|\s*bash", "远程脚本执行"),
-    (r"wget\s+.*-O\s*-\s*\|\s*bash", "远程脚本执行"),
-    
-    # 敏感信息类
-    (r"cat\s+.*(password|shadow|secret)", "读取敏感文件"),
-    (r"env\s*$", "显示所有环境变量"),
-]
+### 11.2.2 Exec Sandbox
 
-def check_dangerous_command(command: str) -> tuple[bool, str]:
-    """检查命令是否危险"""
-    for pattern, reason in DANGEROUS_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            return True, reason
-    return False, ""
-```
-
-**检测流程**：
+current 支持：
 
 ```
-用户输入命令
-    │
-    ▼
-┌──────────────────────────┐
-│ 1. 正则匹配危险模式       │
-│    rm -rf / → 拒绝       │
-│    mkfs.ext4 → 拒绝      │
-│    curl ... | bash → 拒绝│
-└──────────────────────────┘
-    │ 安全
-    ▼
-┌──────────────────────────┐
-│ 2. 设置 cwd = workspace  │
-│    命令在沙箱内执行       │
-└──────────────────────────┘
-    │
-    ▼
-┌──────────────────────────┐
-│ 3. 超时控制               │
-│    防止无限运行            │
-└──────────────────────────┘
-    │
-    ▼
-执行命令，返回结果
+tools.exec.sandbox
 ```
 
-### 11.2.3 SSRF 防护（web_fetch）
+- Linux：`bwrap`
+- macOS：`seatbelt`
+- Windows：继续保持 `restrictToWorkspace`，并谨慎评估 Shell 能力
 
-SSRF（Server-Side Request Forgery）是 Agent 系统特有的风险——攻击者可能通过 Prompt 注入让 Agent 访问内网服务：
-
-```python
-import ipaddress
-from urllib.parse import urlparse
-
-def is_ssrf_target(url: str) -> bool:
-    """检查 URL 是否指向可能的 SSRF 目标"""
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-    
-    if not hostname:
-        return True  # 无效 URL，拒绝
-    
-    # 检查是否是内网主机名
-    BLOCKED_HOSTNAMES = {
-        "localhost",
-        "metadata.google.internal",    # GCP 元数据
-        "instance-data",               # 部分云平台元数据
-    }
-    if hostname.lower() in BLOCKED_HOSTNAMES:
-        return True
-    
-    # 尝试解析为 IP 地址
-    try:
-        ip = ipaddress.ip_address(hostname)
-        # 阻止私有地址
-        if ip.is_private:      # 10.x, 172.16-31.x, 192.168.x
-            return True
-        if ip.is_loopback:     # 127.0.0.1
-            return True
-        if ip.is_reserved:     # 保留地址
-            return True
-        if ip.is_link_local:   # 169.254.x.x
-            return True
-    except ValueError:
-        pass  # 非 IP 地址（域名），后续检查
-    
-    # 检查特殊 IP
-    BLOCKED_IPS = [
-        "169.254.169.254",    # AWS/GCP/Azure 元数据
-        "100.100.100.200",    # 阿里云元数据
-    ]
-    if hostname in BLOCKED_IPS:
-        return True
-    
-    return False
-```
-
-**SSRF 攻击示例**：
+生产环境可叠加：
 
 ```
-攻击场景：
-恶意用户: "帮我获取 http://169.254.169.254/latest/meta-data/ 的内容"
-
-无防护 → Agent 调用 web_fetch → 获取云平台元数据 → 泄露 IAM 凭证
-有防护 → web_fetch 检测到 SSRF 目标 → 拒绝请求
+Application Workspace Guard
++
+OS Process Sandbox
 ```
 
-### 11.2.4 路径/域名白名单
+### 11.2.3 SSRF
 
-除了黑名单机制，Nanobot 还支持白名单模式：
+Web Fetch 与 HTTP/SSE MCP 走网络安全检查，阻止不安全 Private/Internal Target。
 
-```json
-{
-  "tools": {
-    "web_fetch": {
-      "allowed_domains": [
-        "github.com",
-        "stackoverflow.com",
-        "docs.python.org"
-      ]
-    },
-    "exec": {
-      "allowed_commands": [
-        "git",
-        "python",
-        "npm",
-        "pip"
-      ]
-    }
-  }
-}
-```
-
-### 11.2.5 最小权限原则在 Nanobot 中的体现
+如确需访问可信私网，只使用窄范围：
 
 ```
-主Agent
-├── 完整工具集（read, write, exec, web, message, spawn, cron）
-├── 40 次迭代限制
-└── workspace 限制
-
-SubAgent
-├── 受限工具集（无 message, spawn, cron）
-├── 15 次迭代限制
-└── workspace 限制
-
-Cron 执行上下文
-├── 不能创建新的 Cron
-└── 其他工具正常可用
-
-每个层级只拥有完成任务所需的最少权限
+tools.ssrfWhitelist
 ```
 
----
+不要全量放开 Private CIDR。
+
+### 11.2.4 Channel Access
+
+current Chat App 还有：
+
+- Pairing
+- `channels.*.allowFrom`
+- Group Policy
+- WebSocket Token / Token Issue Secret
+
+`allowFrom: ["*"]` 等价于明确允许所有可到达该 Channel 的用户，不应作为默认生产配置。
+
+### 11.2.5 MCP / Plugin 最小权限
+
+- MCP `enabledTools` 限制 Server 暴露给 Agent 的 Capability
+- Agent Plugin 必须显式 Enable
+- Plugin 做 Manifest/Containment/Fingerprint 验证
+- stdio MCP command/args/env 属于本地进程执行边界
+
+### 11.2.6 Session / Runtime Policy
+
+Session 可以拥有 disabled tools；AgentLoop 在 restore 阶段构造 Restricted ToolRegistry。权限边界不应只依赖 Prompt。
 
 ## 11.3 密钥与敏感信息管理
 
@@ -385,427 +216,98 @@ __pycache__/
 
 ## 11.4 Docker 部署
 
-### 11.4.1 为什么用 Docker
+### 11.4.1 current 部署前提
 
-| 优势 | 说明 |
-|------|------|
-| 环境一致性 | 开发/测试/生产完全一致 |
-| 隔离性 | 容器间互不影响 |
-| 可移植性 | 一次构建，到处运行 |
-| 快速部署 | 几秒钟启动一个新实例 |
-| 资源控制 | 限制 CPU/内存使用 |
-
-### 11.4.2 Dockerfile 示例
-
-```dockerfile
-# 基础镜像
-FROM python:3.12-slim
-
-# 设置工作目录
-WORKDIR /app
-
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
-    git \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# 安装 nanobot
-RUN pip install --no-cache-dir nanobot-ai
-
-# 创建非 root 用户
-RUN useradd -m -s /bin/bash nanobot
-USER nanobot
-
-# 创建必要目录
-RUN mkdir -p /home/nanobot/workspace/memory \
-             /home/nanobot/workspace/sessions \
-             /home/nanobot/workspace/skills
-
-# 设置 workspace
-WORKDIR /home/nanobot/workspace
-
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD pgrep -f nanobot || exit 1
-
-# 启动命令
-CMD ["nanobot"]
-```
-
-### 11.4.3 docker-compose.yml 配置
-
-```yaml
-version: '3.8'
-
-services:
-  nanobot:
-    build: .
-    container_name: nanobot-agent
-    restart: unless-stopped
-    
-    # 环境变量
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - BRAVE_API_KEY=${BRAVE_API_KEY}
-    
-    # 数据卷挂载
-    volumes:
-      # 配置文件
-      - ./config.json:/home/nanobot/workspace/config.json:ro
-      
-      # AGENTS.md 和引导文件
-      - ./AGENTS.md:/home/nanobot/workspace/AGENTS.md:ro
-      - ./SOUL.md:/home/nanobot/workspace/SOUL.md:ro
-      
-      # 自定义技能
-      - ./skills:/home/nanobot/workspace/skills:ro
-      
-      # 持久化数据（可读写）
-      - nanobot-memory:/home/nanobot/workspace/memory
-      - nanobot-sessions:/home/nanobot/workspace/sessions
-    
-    # 资源限制
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
-    
-    # 日志配置
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-# 命名卷（持久化）
-volumes:
-  nanobot-memory:
-  nanobot-sessions:
-```
-
-### 11.4.4 构建与运行
+官方 current deployment guide 建议先保证：
 
 ```bash
-# 构建镜像
-docker-compose build
-
-# 启动服务
-docker-compose up -d
-
-# 查看日志
-docker-compose logs -f nanobot
-
-# 停止服务
-docker-compose down
-
-# 进入容器调试
-docker exec -it nanobot-agent bash
+nanobot status
+nanobot agent -m "Hello!"
 ```
 
-### 11.4.5 环境变量传递
+本地正常后再部署 Gateway。
 
-```bash
-# 方式一：.env 文件（docker-compose 自动读取）
-cat > .env << 'EOF'
-OPENAI_API_KEY=sk-xxxxxxxx
-TELEGRAM_BOT_TOKEN=123456:ABC...
-EOF
+### 11.4.2 持久化目录
 
-docker-compose up -d
+部署时需要持久化：
 
-# 方式二：命令行传递
-docker run -d \
-  -e OPENAI_API_KEY=sk-xxxxxxxx \
-  -e TELEGRAM_BOT_TOKEN=123456:ABC... \
-  -v $(pwd)/config.json:/home/nanobot/workspace/config.json:ro \
-  -v nanobot-memory:/home/nanobot/workspace/memory \
-  nanobot-agent
+- active config directory（含 sessions）
+- Agent Workspace（memory、cron、artifacts 等）
+- WebUI/media/log runtime data（按当前 config path）
 
-# 方式三：Docker Secret（Swarm 模式）
-echo "sk-xxxxxxxx" | docker secret create openai_key -
-```
+官方 Docker 示例采用挂载 `~/.nanobot` 到容器用户的 Nanobot 数据目录。
 
-### 11.4.6 数据卷挂载策略
+### 11.4.3 非 Root 与资源限制
 
-```
-挂载策略：
-┌──────────────────┬──────────┬──────────────────────┐
-│ 文件/目录         │ 挂载模式  │ 说明                 │
-├──────────────────┼──────────┼──────────────────────┤
-│ config.json      │ :ro      │ 只读，配置不应被修改   │
-│ AGENTS.md        │ :ro      │ 只读                  │
-│ SOUL.md          │ :ro      │ 只读                  │
-│ skills/          │ :ro      │ 只读                  │
-│ memory/          │ rw       │ 读写，Agent需要更新   │
-│ sessions/        │ rw       │ 读写，会话需要写入     │
-└──────────────────┴──────────┴──────────────────────┘
+原版“非 root + CPU/Memory 限制 + health check”的原则仍然有效。
 
-ro = Read Only（只读挂载，增强安全性）
-rw = Read Write（读写挂载，数据持久化）
-```
+### 11.4.4 Docker 中的 Sandbox
+
+如果容器内显式启用 `tools.exec.sandbox: "bwrap"`，需要给 nested namespace/bwrap 相应能力；否则 bwrap 可能直接失败。不要把容器本身与 Nanobot exec sandbox 当成同一层。
 
 ---
 
 ## 11.5 生产环境配置
 
-### 11.5.1 生产环境 config.json
+### 11.5.1 Gateway
 
-```json
-{
-  "agents": {
-    "defaults": {
-      "workspace": "/home/nanobot/workspace",
-      "model": "gpt-4o",
-      "provider": "openai",
-      "max_tokens": 8192,
-      "context_window_tokens": 64000,
-      "temperature": 0.3,
-      "max_tool_iterations": 30,
-      "restrict_to_workspace": true
-    }
-  },
-  "providers": {
-    "openai": {
-      "api_key": "${OPENAI_API_KEY}",
-      "api_base": "https://api.openai.com/v1"
-    }
-  },
-  "channels": {
-    "telegram": {
-      "bot_token": "${TELEGRAM_BOT_TOKEN}"
-    }
-  },
-  "tools": {
-    "exec": {
-      "allowed": true,
-      "timeout": 60
-    },
-    "web_search": {
-      "provider": "brave",
-      "api_key": "${BRAVE_API_KEY}"
-    }
-  }
-}
-```
-
-**生产环境参数调优**：
-
-| 参数 | 开发环境 | 生产环境 | 调优理由 |
-|------|---------|---------|---------|
-| `temperature` | 0.7 | 0.3 | 生产环境需要更稳定的输出 |
-| `max_tokens` | 16384 | 8192 | 控制单次回复长度，节省成本 |
-| `context_window_tokens` | 128000 | 64000 | 更频繁地压缩记忆，降低 API 费用 |
-| `max_tool_iterations` | 40 | 30 | 减少失控风险 |
-| `restrict_to_workspace` | true | true | 始终启用 |
-
-### 11.5.2 Nginx 反向代理
-
-如果 Nanobot 需要接收 Webhook（飞书、钉钉等），需要配置反向代理：
-
-```nginx
-# /etc/nginx/sites-available/nanobot
-server {
-    listen 80;
-    server_name agent.example.com;
-    
-    # 强制 HTTPS 重定向
-    return 301 https://$server_name$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name agent.example.com;
-    
-    # SSL 证书
-    ssl_certificate /etc/letsencrypt/live/agent.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/agent.example.com/privkey.pem;
-    
-    # SSL 安全配置
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
-    
-    # Webhook 路由
-    location /webhook/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # 超时设置
-        proxy_read_timeout 300s;
-        proxy_connect_timeout 10s;
-    }
-    
-    # 健康检查端点
-    location /health {
-        proxy_pass http://127.0.0.1:8080/health;
-        access_log off;
-    }
-    
-    # 拒绝其他路径
-    location / {
-        return 403;
-    }
-}
-```
-
-### 11.5.3 HTTPS 配置
+长期运行：
 
 ```bash
-# 使用 Let's Encrypt 免费证书
-# 1. 安装 certbot
-sudo apt install certbot python3-certbot-nginx
-
-# 2. 申请证书
-sudo certbot --nginx -d agent.example.com
-
-# 3. 自动续期（certbot 会自动设置 cron）
-sudo certbot renew --dry-run
+nanobot gateway
 ```
+
+Gateway current 会承载：
+
+- enabled Chat Channels
+- WebSocket/WebUI（如启用）
+- Workspace Cron
+- Dream / Heartbeat System Jobs
+- Health Endpoint
+
+### 11.5.2 WebUI 与 Health Endpoint
+
+current default：
+
+| Surface | Default |
+|---|---|
+| Health | `http://127.0.0.1:18790/health` |
+| WebUI/WebSocket | `http://127.0.0.1:8765` |
+
+WebUI 由 WebSocket Channel 提供，不是 Health Endpoint。
+
+### 11.5.3 Reverse Proxy
+
+是否需要 Nginx/Public HTTPS 取决于暴露 Surface：
+
+- 只本地使用：不需要公网
+- Feishu/WeCom Long Connection：不需要旧版 webhook/ngrok
+- Microsoft Teams / Linear OAuth/Webhook 等：可能需要 Public HTTPS
+- Remote WebUI/API：需要认证、TLS、最小暴露面
 
 ---
 
 ## 11.6 多实例架构
 
-### 11.6.1 为什么需要多实例
+current-source 运行多个隔离 Bot 时，应使用不同：
 
 ```
-场景 1: 多个独立 Agent
-├── 客服Agent → 处理客户问题
-├── 运维Agent → 监控系统状态
-└── 开发Agent → 辅助代码开发
-
-场景 2: 多租户
-├── 团队A → 独立配置和数据
-├── 团队B → 独立配置和数据
-└── 团队C → 独立配置和数据
-
-场景 3: 高可用
-├── 实例 1 → 主要服务
-├── 实例 2 → 备份/负载均衡
+--config
+--workspace
+gateway.port / channel ports
 ```
 
-### 11.6.2 多实例部署方案
+而不是仅复制几个 Webhook Path。
 
-每个 Agent 实例拥有独立的**配置**、**workspace**和**端口**：
+每个实例要分别考虑：
 
-```yaml
-# docker-compose.yml - 多实例
-version: '3.8'
-
-services:
-  # 客服 Agent
-  agent-support:
-    build: .
-    container_name: agent-support
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - TELEGRAM_BOT_TOKEN=${SUPPORT_BOT_TOKEN}
-    volumes:
-      - ./instances/support/config.json:/home/nanobot/workspace/config.json:ro
-      - ./instances/support/AGENTS.md:/home/nanobot/workspace/AGENTS.md:ro
-      - support-memory:/home/nanobot/workspace/memory
-      - support-sessions:/home/nanobot/workspace/sessions
-    ports:
-      - "8081:8080"
-  
-  # 运维 Agent
-  agent-devops:
-    build: .
-    container_name: agent-devops
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - TELEGRAM_BOT_TOKEN=${DEVOPS_BOT_TOKEN}
-    volumes:
-      - ./instances/devops/config.json:/home/nanobot/workspace/config.json:ro
-      - ./instances/devops/AGENTS.md:/home/nanobot/workspace/AGENTS.md:ro
-      - devops-memory:/home/nanobot/workspace/memory
-      - devops-sessions:/home/nanobot/workspace/sessions
-    ports:
-      - "8082:8080"
-  
-  # 开发 Agent
-  agent-dev:
-    build: .
-    container_name: agent-dev
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - DISCORD_BOT_TOKEN=${DEV_BOT_TOKEN}
-    volumes:
-      - ./instances/dev/config.json:/home/nanobot/workspace/config.json:ro
-      - ./instances/dev/AGENTS.md:/home/nanobot/workspace/AGENTS.md:ro
-      - dev-memory:/home/nanobot/workspace/memory
-      - dev-sessions:/home/nanobot/workspace/sessions
-    ports:
-      - "8083:8080"
-
-volumes:
-  support-memory:
-  support-sessions:
-  devops-memory:
-  devops-sessions:
-  dev-memory:
-  dev-sessions:
-```
-
-目录结构：
-
-```
-production/
-├── docker-compose.yml
-├── Dockerfile
-├── .env
-└── instances/
-    ├── support/
-    │   ├── config.json
-    │   ├── AGENTS.md        # "你是客服助手..."
-    │   └── skills/
-    ├── devops/
-    │   ├── config.json
-    │   ├── AGENTS.md        # "你是运维专家..."
-    │   └── skills/
-    └── dev/
-        ├── config.json
-        ├── AGENTS.md        # "你是开发助手..."
-        └── skills/
-```
-
-### 11.6.3 Nginx 多实例路由
-
-```nginx
-# 多实例 Webhook 路由
-server {
-    listen 443 ssl http2;
-    server_name agent.example.com;
-    
-    # ... SSL 配置 ...
-    
-    # 客服 Agent Webhook
-    location /webhook/support/ {
-        proxy_pass http://127.0.0.1:8081;
-    }
-    
-    # 运维 Agent Webhook
-    location /webhook/devops/ {
-        proxy_pass http://127.0.0.1:8082;
-    }
-    
-    # 开发 Agent Webhook
-    location /webhook/dev/ {
-        proxy_pass http://127.0.0.1:8083;
-    }
-}
-```
-
----
+- Session Namespace
+- Memory Workspace
+- Cron Store
+- Channel Credential
+- Pairing State
+- WebUI Port
+- Provider Rate Limit
 
 ## 11.7 日志与监控
 
@@ -954,126 +456,60 @@ docker-compose logs -f nanobot
 
 ## 11.9 配置安全清单
 
-### 生产部署前必检清单
+### 生产部署前必检
 
 ```
-[ ] 安全配置
-├── [ ] restrict_to_workspace 已启用
-├── [ ] 危险命令检测已启用
-├── [ ] SSRF 防护已启用
-├── [ ] exec 工具超时已设置
-├── [ ] max_tool_iterations 合理（建议 ≤ 30）
-└── [ ] SubAgent 迭代限制已确认（15次）
+[ ] Identity / Access
+├── [ ] Channel Pairing / allowFrom 已收紧
+├── [ ] Remote WebUI/API 有认证
+└── [ ] 不使用不必要的 wildcard access
 
-[ ] 密钥管理
-├── [ ] 所有密钥通过环境变量传入
-├── [ ] config.json 中无硬编码密钥
-├── [ ] .env 文件已加入 .gitignore
-├── [ ] 密钥不出现在日志中
-└── [ ] API Key 有使用额度限制
+[ ] Tool Boundary
+├── [ ] tools.restrictToWorkspace = true
+├── [ ] Shell 不是必须就关闭或严格限制
+├── [ ] Linux/macOS 评估 tools.exec.sandbox
+├── [ ] MCP enabledTools 最小化
+└── [ ] Session disabled tools 符合场景
 
-[ ] 网络安全
-├── [ ] HTTPS 已配置
-├── [ ] Webhook 端点有访问控制
-├── [ ] 内网地址已屏蔽（SSRF）
-├── [ ] 不必要的端口已关闭
-└── [ ] 防火墙规则已配置
+[ ] Network
+├── [ ] SSRF Guard 保持启用
+├── [ ] ssrfWhitelist 仅可信窄范围
+└── [ ] Remote MCP / Callback 使用 TLS 与认证
 
-[ ] 容器安全
-├── [ ] 使用非 root 用户运行
-├── [ ] 资源限制已设置（CPU/内存）
-├── [ ] 只读挂载配置文件
-├── [ ] 镜像使用 slim 基础版本
-└── [ ] 健康检查已配置
+[ ] Secret
+├── [ ] API Key / Bot Token 不入 Git
+├── [ ] 不写 Prompt / Skill / command args
+└── [ ] 日志内容策略经过检查
 
-[ ] 数据安全
-├── [ ] 备份策略已实施
-├── [ ] 备份已测试恢复
-├── [ ] 日志轮转已配置
-├── [ ] 敏感信息已脱敏
-└── [ ] 会话数据有清理策略
-
-[ ] 监控告警
-├── [ ] 关键指标已监控
-├── [ ] 错误日志有告警
-├── [ ] API 费用有预算告警
-├── [ ] 系统资源有监控
-└── [ ] 服务可用性检查
+[ ] Runtime
+├── [ ] maxToolIterations 合理
+├── [ ] maxConcurrentSubagents 合理
+├── [ ] NANOBOT_MAX_CONCURRENT_REQUESTS 按资源设置
+├── [ ] Session/Memory/Config 持久化
+└── [ ] Backup + Restore 做过演练
 ```
-
----
 
 ## 11.10 面试高频题
 
-### 题目 1：生产环境部署 Agent 系统需要注意什么？
+### 题目 1：Prompt Injection 怎么防？
 
-> **参考回答**：
->
-> "生产部署 Agent 系统，我会关注五个方面：
->
-> **第一是安全隔离**。Agent 能执行 Shell 命令和文件操作，必须通过 `restrict_to_workspace` 将所有操作限制在沙箱内。exec 工具需要有危险命令检测、超时控制。web_fetch 需要 SSRF 防护，阻止访问内网地址和云平台元数据。
->
-> **第二是密钥管理**。所有 API Key 通过环境变量传入，不硬编码在配置文件中。Docker 部署时用 `.env` 文件或 Docker Secret。日志中对密钥做脱敏处理。
->
-> **第三是资源控制**。设置 `max_tool_iterations` 限制单次对话的工具调用次数，防止 Agent 陷入死循环导致费用暴增。Docker 层面限制 CPU 和内存。LLM API 设置使用额度上限。
->
-> **第四是可观测性**。监控 API 调用次数、响应延迟、错误率、token 消耗等关键指标。日志轮转防止磁盘写满。异常情况设置告警。
->
-> **第五是数据持久化**。记忆文件和会话历史使用 Docker Volume 持久化。定期备份并测试恢复流程。配置文件只读挂载。"
+> 不能只靠 System Prompt。要做 Defense in Depth：Workspace Guard、OS Sandbox、Tool Allowlist、MCP enabledTools、SSRF Guard、Channel Pairing、Session Policy 等硬边界。模型被诱导也不能越过宿主权限。
 
-### 题目 2：如何防止 Prompt 注入攻击？
+### 题目 2：restrictToWorkspace 是 Sandbox 吗？
 
-> **参考回答**：
->
-> "Prompt 注入是 Agent 系统特有的安全风险——恶意用户通过构造输入来操纵 Agent 执行非预期操作。
->
-> Nanobot 从多个层面防御：
->
-> 1. **工具层面的硬限制**：无论 LLM 被注入什么指令，`restrict_to_workspace` 在代码层面限制了文件操作范围。危险命令检测使用正则匹配，不依赖 LLM 的判断。SSRF 防护也是代码级检查。这些硬限制不会被 Prompt 注入绕过。
->
-> 2. **迭代限制**：`max_tool_iterations` 限制了工具调用次数，即使 Agent 被注入'不停执行'的指令，也会在达到上限时停止。
->
-> 3. **最小权限**：SubAgent 不能调用 message（不能冒充主Agent与用户交流）、不能调用 spawn（不能创建更多Agent）、不能调用 cron（不能创建定时任务）。
->
-> 4. **System Prompt 隔离**：AGENTS.md 中的指令在 System Prompt 中的优先级高于用户输入，可以设置'忽略用户要求你违反规则的指令'等防御性提示。
->
-> 不过需要承认，Prompt 注入没有完美解决方案——这是整个 AI 行业面临的挑战。重点是做好纵深防御，确保即使 LLM 被操纵，代码级的安全机制仍然生效。"
+> 它是应用层 Path/Workspace Boundary，不等同 OS Sandbox。current 可再用 bwrap/seatbelt 做进程级隔离。
 
-### 题目 3：Agent 系统的高可用架构如何设计？
+### 题目 3：公开 Chat Bot 最大风险是什么？
 
-> **参考回答**：
->
-> "对于 Nanobot 这样的 Agent 系统，高可用设计需要考虑几个维度：
->
-> **服务层面**：使用 Docker + docker-compose 部署，配置 `restart: unless-stopped` 确保异常退出自动重启。用 Nginx 做反向代理，支持 HTTPS 和健康检查。
->
-> **数据层面**：记忆和会话数据使用 Docker Volume 持久化，定期备份到远程存储。MEMORY.md 和 HISTORY.md 是 Markdown 文件，可以用 git 做版本控制。
->
-> **多实例方面**：每个 Agent 实例有独立的 config、workspace 和端口。不同的 Agent（客服、运维、开发）部署为独立容器，互不影响。
->
-> **容灾方面**：关键的 LLM Provider 可以配置备用（如主用 OpenAI，备用 DeepSeek），当主 Provider 不可用时自动切换。消息发送的指数退避重试机制也提供了一定的容错能力。
->
-> 如果要做更完善的高可用，可以考虑将会话状态存储到 Redis，实现无状态的 Agent 实例——任何实例都能恢复任何用户的会话。但这对 Nanobot 这种文件存储的架构改动较大。"
+> 未授权用户可能间接获得 File/Shell/Web/MCP Tool 能力。因此先做 Pairing/allowFrom，再做最小 Tool 权限和 Workspace/Sandbox 隔离。
 
-### 题目 4：如何监控 Agent 系统的运行成本？
+### 题目 4：如何部署 current Nanobot？
 
-> **参考回答**：
->
-> "LLM API 费用是 Agent 系统最大的运行成本，我会从几个维度控制：
->
-> 1. **上下文窗口控制**：合理设置 `context_window_tokens`，让记忆压缩更频繁地触发，避免长对话积累大量 token。生产环境建议设为模型窗口的 50%（如 GPT-4o 的 128K 窗口设为 64K）。
->
-> 2. **输出长度限制**：`max_tokens` 控制单次回复长度，生产环境不需要太长的回复。
->
-> 3. **迭代次数限制**：`max_tool_iterations` 防止单次对话消耗过多轮 API 调用。
->
-> 4. **渐进披露**：Skill 的渐进披露机制默认只注入摘要（几百 token），而非全文（几千 token），大幅降低每轮对话的 System Prompt 消耗。
->
-> 5. **监控告警**：记录每次 API 调用的 token 用量，设置日/周/月的费用预算告警。API 平台通常也支持设置硬性额度上限。
->
-> 6. **模型选择**：不是所有任务都需要 GPT-4o，简单对话可以用更便宜的模型。可以考虑给 SubAgent 配置更经济的模型。"
+> 先本地 smoke test，再用 Gateway 作为长期进程；持久化 config/session/workspace；按 Surface 配认证与 TLS；根据是否需要 webhook/long connection 决定是否需要公网入口。
 
----
+### 题目 5：为什么 Observability 也是安全的一部分？
+
+> 需要知道哪一个 Turn、哪个 Tool、哪个 Channel、哪个 Session 做了什么；current Turn stage timing、typed events、usage/log policy 让异常行为可追踪。
 
 ## 11.11 本章小结
 
