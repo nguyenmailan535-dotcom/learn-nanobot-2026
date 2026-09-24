@@ -378,81 +378,51 @@ logger.info(safe_log("Provider config", {
 
 ## 11.8 备份策略
 
-### 11.8.1 需要备份的数据
+### 11.8.1 current-source 需要备份什么
 
-```
-必须备份：
-├── memory/MEMORY.md      # 长期记忆
-├── memory/HISTORY.md     # 历史时间线
-├── sessions/*.jsonl      # 会话历史
-├── config.json           # 配置文件
-├── AGENTS.md             # Agent 身份定义
-└── skills/               # 自定义技能
+current 默认状态分散在 Config Data Directory 与 Agent Workspace，备份时不要再只打包旧版 `memory/HISTORY.md`。
 
-不需要备份（可重建）：
-├── __pycache__/
-└── .nanobot/
-```
+~~~text
+建议备份：
+├── <config-dir>/config.json
+├── <config-dir>/sessions/<workspace-id>/
+├── <agent-workspace>/SOUL.md
+├── <agent-workspace>/USER.md
+├── <agent-workspace>/AGENTS.md
+├── <agent-workspace>/memory/
+│   ├── MEMORY.md
+│   ├── history.jsonl
+│   └── Dream/Git state
+├── <agent-workspace>/skills/
+├── <agent-workspace>/plugins/
+└── <agent-workspace>/cron/
+    ├── jobs.json
+    └── runs/
+~~~
 
-### 11.8.2 自动备份脚本
+WebUI/media/log 等运行数据是否需要备份，取决于你的恢复目标。
 
-```bash
-#!/bin/bash
-# backup-nanobot.sh
+### 11.8.2 为什么 Session 与 Workspace 都要备份
 
-WORKSPACE="/home/nanobot/workspace"
-BACKUP_DIR="/backups/nanobot"
-DATE=$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="${BACKUP_DIR}/nanobot_backup_${DATE}.tar.gz"
+只备份 Workspace：
 
-# 创建备份目录
-mkdir -p ${BACKUP_DIR}
+- Long-term Memory 还在
+- 但 Conversation Replay / Provider State / Session Metadata 可能丢失
 
-# 打包备份
-tar -czf ${BACKUP_FILE} \
-    -C ${WORKSPACE} \
-    memory/ \
-    sessions/ \
-    config.json \
-    AGENTS.md \
-    SOUL.md \
-    skills/
+只备份 Session：
 
-# 保留最近 30 天的备份
-find ${BACKUP_DIR} -name "*.tar.gz" -mtime +30 -delete
+- Conversation 还在
+- 但 SOUL/USER/MEMORY/Skills/Plugins/Cron 可能丢失
 
-echo "Backup created: ${BACKUP_FILE}"
-echo "Size: $(du -h ${BACKUP_FILE} | cut -f1)"
-```
+所以恢复策略要围绕**整个实例状态**设计。
 
-```bash
-# 添加到 crontab，每天凌晨 3 点备份
-crontab -e
-# 0 3 * * * /home/nanobot/scripts/backup-nanobot.sh >> /var/log/nanobot-backup.log 2>&1
-```
+### 11.8.3 备份原则
 
-### 11.8.3 恢复流程
-
-```bash
-# 1. 停止服务
-docker-compose down
-
-# 2. 恢复数据
-BACKUP_FILE="/backups/nanobot/nanobot_backup_20240315_030000.tar.gz"
-tar -xzf ${BACKUP_FILE} -C /home/nanobot/workspace/
-
-# 3. 验证文件完整性
-ls -la /home/nanobot/workspace/memory/
-ls -la /home/nanobot/workspace/sessions/
-
-# 4. 重新启动
-docker-compose up -d
-
-# 5. 验证服务正常
-docker-compose logs -f nanobot
-```
-
----
+1. **先确认 active paths**：用 `nanobot status`，不要假设固定路径。
+2. **一致性**：运行中的 JSONL/Job Store 最好在受控时点快照。
+3. **Secret**：Config Backup 本身包含敏感 Credential 时要加密和限制权限。
+4. **恢复演练**：备份成功不等于可恢复，必须在独立目录做 Restore Test。
+5. **Dream 可审计**：Durable Memory 的 Git-backed history 也属于有价值的恢复信息。
 
 ## 11.9 配置安全清单
 
@@ -513,59 +483,48 @@ docker-compose logs -f nanobot
 
 ## 11.11 本章小结
 
-### 安全机制总图
+### current Security / Deployment 心智模型
 
-```
-┌──────────────────────────────────────────────────────┐
-│                Nanobot 安全防御体系                    │
-│                                                      │
-│  ┌─ 代码级硬限制 ──────────────────────────────────┐ │
-│  │                                                 │ │
-│  │  restrict_to_workspace                          │ │
-│  │  ├── 文件操作路径验证（防路径遍历）              │ │
-│  │  └── exec 的 cwd 强制设为 workspace             │ │
-│  │                                                 │ │
-│  │  exec 危险命令检测                               │ │
-│  │  ├── 正则匹配危险模式                            │ │
-│  │  └── 超时控制                                   │ │
-│  │                                                 │ │
-│  │  SSRF 防护                                      │ │
-│  │  ├── 私有 IP 地址阻止                           │ │
-│  │  ├── 云元数据地址阻止                            │ │
-│  │  └── 域名白名单（可选）                          │ │
-│  └─────────────────────────────────────────────────┘ │
-│                                                      │
-│  ┌─ 权限控制 ──────────────────────────────────────┐ │
-│  │  主Agent: 完整工具集 + 40次迭代                  │ │
-│  │  SubAgent: 受限工具集 + 15次迭代                 │ │
-│  │  Cron上下文: 禁止创建新Cron                      │ │
-│  └─────────────────────────────────────────────────┘ │
-│                                                      │
-│  ┌─ 密钥管理 ──────────────────────────────────────┐ │
-│  │  环境变量传入 + .gitignore + 日志脱敏            │ │
-│  └─────────────────────────────────────────────────┘ │
-│                                                      │
-│  ┌─ 运维安全 ──────────────────────────────────────┐ │
-│  │  HTTPS + 非root运行 + 资源限制 + 监控告警       │ │
-│  └─────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────┘
-```
+~~~text
+Untrusted User / Document / MCP Result
+        ↓
+Channel Access
+├── Pairing
+└── allowFrom
+        ↓
+Agent Runtime
+├── Session Policy
+├── Tool Allowlist / MCP enabledTools
+├── max iterations / concurrency / timeout
+└── Recovery / Logging
+        ↓
+Host Boundary
+├── tools.restrictToWorkspace
+├── tools.exec.sandbox
+└── SSRF Guard / ssrfWhitelist
+        ↓
+Deployment
+├── non-root
+├── Resource Limits
+├── TLS / Auth
+├── Persistent Config + Session + Workspace
+└── Backup / Restore / Health / Observability
+~~~
 
 ### 面试记忆清单
 
-| 考点 | 一句话回答 |
-|------|-----------|
-| 核心安全机制 | restrict_to_workspace 限制文件和Shell操作范围 |
-| 危险命令 | exec 工具正则检测 rm -rf /、mkfs 等危险模式 |
-| SSRF 防护 | web_fetch 阻止私有IP、云元数据地址 |
-| 密钥管理 | 环境变量传入，不硬编码，不入库 |
-| Docker 部署 | 非root用户 + 资源限制 + 只读挂载配置 |
-| 数据持久化 | Docker Volume 挂载 memory/ 和 sessions/ |
-| 多实例 | 独立 config/workspace/端口，互不影响 |
-| 备份策略 | 定期备份 memory + sessions + config |
-| 成本控制 | context_window_tokens + max_tokens + 渐进披露 |
-| 设计原则 | 最小权限 + 纵深防御 + 故障安全 |
+| 考点 | current-source 一句话回答 |
+|---|---|
+| 文件边界 | `tools.restrictToWorkspace` 是应用层 Workspace Guard |
+| Shell 隔离 | Linux 可用 bwrap，macOS 可用 seatbelt；与 Workspace Guard 分层 |
+| SSRF | Web/MCP HTTP 默认做网络安全检查，私网例外只加窄范围 whitelist |
+| Channel 权限 | Pairing / strict allowFrom，避免陌生人间接获得 Tool 能力 |
+| MCP 权限 | enabledTools 最小化 |
+| Subagent | Iteration/Concurrency 可配置，不背固定“15 次” |
+| 部署 | Gateway 是长期运行宿主；按 Surface 决定是否需要公网 HTTPS |
+| 持久化 | 同时保护 Config Data、Sessions、Agent Workspace |
+| 设计原则 | 最小权限 + 纵深防御 + 故障安全 + 可审计 |
 
 ---
 
-> **下一章**：[12 - Nanobot 实战项目](../12-nanobot-real-projects/README.md) —— 通过实战项目深入掌握 Nanobot 的高级用法
+> **下一章**：[12 - 定制实战项目](../12-nanobot-real-projects/README.md)
