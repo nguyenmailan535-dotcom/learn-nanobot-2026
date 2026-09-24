@@ -1,8 +1,8 @@
-# 10 - 子 Agent、Cron 与 Heartbeat
+# 10 - 子Agent与定时任务
 
-> **阅读时间**：约 2 小时  
-> **前置知识**：[09 - 多平台接入](../09-mcp-integration/README.md)  
-> **学习目标**：沿用原版章节组织，以 **2026-09-24 HKUDS/nanobot main** 为准理解 SubagentManager、CronService、Local Trigger 与 Gateway Heartbeat 的真实职责和协作关系。
+> **阅读时间**：约 1.5 小时  
+> **前置知识**：[09 - 多平台接入](../09-multi-platform/README.md)  
+> **学习目标**：理解 SubAgent 后台任务机制、Cron 定时调度系统、Heartbeat 心跳服务，掌握并发任务设计
 
 ---
 
@@ -11,7 +11,7 @@
 - [10.1 为什么需要子Agent和定时任务](#101-为什么需要子agent和定时任务)
 - [10.2 子Agent（SubAgent）系统](#102-子agentsubagent系统)
 - [10.3 定时任务（Cron）系统](#103-定时任务cron系统)
-- [10.4 Heartbeat 心跳任务](#104-heartbeat-心跳任务)
+- [10.4 Heartbeat 心跳服务](#104-heartbeat-心跳服务)
 - [10.5 三者的协作关系](#105-三者的协作关系)
 - [10.6 实战练习](#106-实战练习)
 - [10.7 面试高频题](#107-面试高频题)
@@ -23,531 +23,311 @@
 
 ### 10.1.1 主Agent的局限
 
-一个用户 Turn 可以很长，但不是所有任务都适合塞进主 Agent 的单线程决策链。
+主Agent是同步的——用户发消息，Agent处理，返回结果。但有些场景需要：
 
-典型问题：
+```
+场景 1：用户说"帮我调研一下 Rust 和 Go 的对比，要详细的"
+→ 这可能需要 10 分钟搜索和整理
+→ 用户不想等 10 分钟什么都做不了
 
-- 多个独立子任务天然可以并行；
-- 某些工作需要后台继续；
-- 某些任务需要未来某个时间执行；
-- 某些周期检查没有变化时不应该打扰用户；
-- CI/脚本等本地系统需要主动触发 Agent。
+场景 2：用户说"每天早上 8 点给我发一份新闻摘要"
+→ 需要定时执行，不是一次性对话
+
+场景 3：用户同时提出多个独立任务
+→ "帮我查天气，同时分析一下这个代码文件"
+→ 两个任务可以并行处理
+```
 
 ### 10.1.2 解决方案
 
-current-source 把这些需求拆开：
-
-```text
-Subagent
-→ 当前目标中的并行/隔离子任务
-
-Cron
-→ 某个明确时间或周期的 Session-bound Scheduled Turn
-
-Local Trigger
-→ CI / Shell / 外部本地流程显式触发一个 Turn
-
-Heartbeat
-→ 周期后台检查；没重要变化时静默
-```
-
-不要把“后台工作”全部叫 Cron，也不要为了并行就无脑 Spawn 多 Agent。
+| 场景 | 解决方案 |
+|------|---------|
+| 耗时后台任务 | **SubAgent**（子代理后台执行） |
+| 定时触发任务 | **Cron**（定时调度） |
+| 周期性唤醒 | **Heartbeat**（心跳服务） |
 
 ---
 
 ## 10.2 子Agent（SubAgent）系统
 
-### 10.2.1 SpawnTool 启动子代理
+### 10.2.1 SpawnTool
 
-模型通过 Spawn 类 Tool 把一个任务委托给 `SubagentManager`。
+主 Agent 可以通过 Spawn Tool 委托明确子任务。
 
-概念流程：
+### 10.2.2 SubagentManager
 
-```text
-Main Agent
-   ↓ spawn(task)
-SubagentManager
-   ↓
-Task ID + SubagentStatus
-   ↓
-AgentRunner / AgentRunSpec
-   ↓
-Scoped ToolRegistry
-   ↓
-Result
-   ↓
-父 Session 注入 / 通知
+current：
+
 ```
-
-### 10.2.2 SubagentManager 管理
-
-源码：
-
-```text
 nanobot/agent/subagent.py
 ```
 
-current-source 的关键点：
+SubagentManager 支持：
 
-- `spawn()`：后台运行；
-- `run_inline()`：同步等待结果；
-- 记录 `task_id` / label / started_at；
-- 维护 running task map；
-- 维护 Session → Subagent task 关系；
-- 结束后清理状态；
-- 支持父 Session 继续接收结果。
+- background `spawn()`
+- synchronous `run_inline()`
+- task status
+- per-session task tracking
+- result injection
+- scoped Tool Registry / Workspace
 
-### 10.2.3 SubAgent 与主Agent的区别
+### 10.2.3 复用 AgentRunner
 
-current Subagent **不需要再构造一个完整 AgentLoop**。
+current Subagent 不是再启动一个完整 Channel AgentLoop，而是构造 focused prompt/runtime/tools，并复用：
 
-它复用：
-
-```text
+```
 AgentRunner
++
 AgentRunSpec
 ```
 
-并构造更聚焦的：
+这正是 AgentLoop/AgentRunner 分层的实际收益。
 
-- System Prompt；
-- Project Workspace；
-- Tool Scope；
-- Runtime。
+### 10.2.4 工具权限
 
-这正是 AgentLoop / AgentRunner 分层的价值。
+Subagent 使用 scope-specific ToolLoader。需要避免递归/危险 Capability 时，应该从 Tool Registry/Scope 层限制，而不是只靠 Prompt。
 
-### 10.2.4 为什么限制工具集
+### 10.2.5 Iteration 与并发
 
-Subagent 的 ToolRegistry 通过：
+旧版“主 Agent 40 次、SubAgent 固定 15 次”已经不符合 current-source。
 
-```text
-ToolLoader(..., scope="subagent")
+current SubagentManager 接收 `max_iterations`，AgentLoop 会同步 runtime limits；并发由：
+
+```
+agents.defaults.maxConcurrentSubagents
 ```
 
-构造。
+控制，current default 为 **4**。超出容量的任务等待。
 
-目的：
+### 10.2.6 结果回报
 
-1. 减少无关 Tool；
-2. 降低误操作；
-3. 防止子任务获得不需要的高权限；
-4. 减少 Tool Selection 噪声。
-
-这是一种 Least Privilege，而不是单纯“为了 Prompt 短”。
-
-### 10.2.5 迭代限制的设计思考
-
-旧教程写“主 Agent 40、子 Agent 15”已经过时。
-
-current snapshot：
-
-```text
-agents.defaults.maxToolIterations = 200
-```
-
-SubagentManager 默认也从当前 AgentDefaults / Runtime Limit 继承。
-
-真正重要的不是某个数字，而是为什么需要上限：
-
-- 防止 Tool Loop；
-- 限制成本；
-- 防止异常 Provider/Tool 无限重试；
-- 给系统一个可解释的 Stop Reason。
-
-### 10.2.6 并发限制
-
-current：
-
-```text
-agents.defaults.maxConcurrentSubagents = 4
-```
-
-额外任务等待 capacity。
-
-这个限制和：
-
-```text
-NANOBOT_MAX_CONCURRENT_REQUESTS
-```
-
-不是同一件事：
-
-- 前者限制 Subagent；
-- 后者限制 inbound Agent Requests。
-
-### 10.2.7 结果回报机制
-
-主 Session 正在运行时，Subagent result 可以作为 pending input 在 Runner 的 injection boundary 被观察。
-
-current AgentLoop 甚至会在准备退出时等待同 Session 的运行中 Subagent 一段时间，使结果有机会进入当前长 Turn。
-
-### 10.2.8 使用场景
-
-**适合：**
-
-```text
-论文 A → Method 分析
-论文 B → Evaluation 分析
-论文 C → Limitations 分析
-主 Agent → 综合
-```
-
-**不适合：**
-
-```text
-任务本来 1 次 Tool Call 就能做
-却 Spawn 5 个 Subagent
-```
-
-多 Agent 的收益必须大于额外 Token、延迟与调试成本。
-
----
+Subagent 完成后结果可以作为内部 follow-up 注入主 Session。current AgentLoop 还有 terminal wait/injection 逻辑，避免主 Turn 在仍有同 Session 子任务时过早结束。
 
 ## 10.3 定时任务（Cron）系统
 
-### 10.3.1 CronService：current 自有 Scheduler
-
-旧教程写“基于 APScheduler”已经不适用。
+### 10.3.1 current CronService
 
 current：
 
-```text
+```
 nanobot/cron/service.py
 ```
 
-使用自有 `CronService`，通过 `croniter` 计算 Cron Schedule，并把 Job 持久化到：
+不再基于旧教程的 APScheduler 示例。current CronService 自己维护 Job Store/Timer，并使用 `croniter` 计算 cron expression 的下一次运行时间。
 
-```text
+支持三类 schedule：
+
+```
+at
+every
+cron
+```
+
+### 10.3.2 持久化
+
+默认 Store：
+
+```
 <workspace>/cron/jobs.json
 ```
 
-### 10.3.2 cron 工具的三种典型模式
+还会记录 action/run state，并对损坏 Store 做保守处理，避免解析失败后错误覆盖全部任务。
 
-current Built-in Cron Skill 将常见使用概括为：
+### 10.3.3 Session-bound Automation
 
-1. **Reminder**：到时直接提醒；
-2. **Task**：到时让 Agent 执行任务并返回结果；
-3. **One-time**：某个确定时间只运行一次。
+current user-created Agent Cron Job 绑定具体 Session Delivery Context。旧 legacy payload 会迁移；缺少可路由 Session 的 malformed/unbound job 会被禁用，而不是盲目执行。
 
-底层 Schedule 支持：
+### 10.3.4 Cron Tool
 
-```text
-at
-every
-cron expression + timezone
-```
-
-### 10.3.3 调度配置方式
-
-用户通常直接自然语言要求：
-
-```text
-每天 9 点提醒我查看实验
-每周一汇总本周任务
-30 分钟后提醒我
-```
-
-模型通过 `cron` Tool 构造 Schedule。
-
-### 10.3.4 定时任务的执行流程
-
-```text
-cron(action=add)
-   ↓
-CronService
-   ↓
-jobs.json
-   ↓
-到期
-   ↓
-Bound Cron Agent / CronTurnCoordinator
-   ↓
-origin Session Scheduled Turn
-   ↓
-AgentLoop
-   ↓
-执行并向原 Channel/Session 交付结果
-```
-
-current-source 会强制 User Cron Job 绑定可路由的 Session Context；不完整的 Legacy Job 会被迁移或禁用，而不是静默乱发消息。
+`nanobot/agent/tools/cron.py` 通过 ToolContext 接入 CronService，让 Agent 创建/管理 Reminder 和 Recurring Task。
 
 ### 10.3.5 Local Trigger
 
-current Automations 还有一种原版教程没有覆盖的重要能力：
+current Automations 还包含 Local Trigger：
 
-```text
-Local Trigger
+```
+nanobot trigger ...
 ```
 
-用途：
+适合 CI、Shell Script、本地事件把工作送入一个已绑定 Topic/Session。它和 Cron 都走 Automation Turn Coordinator，但触发来源不同。
 
-- CI Job 完成；
-- 本地脚本生成报告；
-- 文件处理完成；
-- 外部 Webhook 被你转换成本地命令。
+## 10.4 Heartbeat 心跳服务
 
-流程：
+### 10.4.1 current Heartbeat
 
-```text
-/trigger <name>
-→ 创建 Trigger
-→ nanobot trigger <id> "payload"
-→ 对应 Session 产生一个 Agent Turn
+current-source 已移除旧的独立 Heartbeat Service。
+
+现在 Gateway 启动时会注册一个**受保护的 Heartbeat Cron Job**，周期读取：
+
 ```
-
-这比用 Cron 轮询某个本地状态更直接。
-
-### 10.3.6 防递归与可靠性
-
-Scheduled Turn 与普通用户输入走不同 automation metadata / coordinator 路径。
-
-设计重点不是“靠 Prompt 告诉模型不要递归”，而是：
-
-- Job 有明确 origin Session；
-- Automation Turn 有独立 metadata；
-- 相同 Session 仍使用 FIFO admission；
-- 系统 Job 和 User Job 有不同 ownership；
-- Cron Store 损坏会保留 corrupt backup，避免直接覆盖丢数据。
-
----
-
-## 10.4 Heartbeat 心跳任务
-
-### 10.4.1 什么是 Heartbeat
-
-current Heartbeat **不是独立旧服务**。
-
-Gateway 启动时，如果：
-
-```text
-gateway.heartbeat.enabled = true
-```
-
-会注册一个受保护的 System Cron Job。
-
-### 10.4.2 配置方式
-
-current defaults：
-
-```text
-gateway.heartbeat.enabled = true
-gateway.heartbeat.intervalS = 1800
-gateway.heartbeat.keepRecentMessages = 8
-```
-
-即默认约每 30 分钟检查一次。
-
-工作清单：
-
-```text
 <workspace>/HEARTBEAT.md
 ```
 
-在：
+默认语义是：
 
-```markdown
-## Active Tasks
-- Check ...
+- 定期检查 Active Tasks
+- 没有有用结果时静默
+- 有值得通知的结果才发送到最近活跃 Chat
+
+### 10.4.2 HEARTBEAT.md
+
+current template：
+
+```
+nanobot/templates/HEARTBEAT.md
 ```
 
-下放需要周期检查的任务。
+这是适合“周期后台检查”的任务清单。
 
-### 10.4.3 心跳触发机制
+### 10.4.3 Cron vs Heartbeat
 
-```text
-Gateway
-  ↓
-Protected Heartbeat Cron Job
-  ↓
-读取 HEARTBEAT.md
-  ↓
-有 Active Tasks?
-  ├─ 否 → silent
-  └─ 是 → Agent 执行
-            ↓
-         Notification Gate
-            ↓
-        有有用/可行动结果?
-        ├─ 否 → silent
-        └─ 是 → 最近活跃 Chat Target
+```
+普通 Cron
+→ 每个 Job 有明确 Prompt/Schedule
+→ 通常回到创建它的 Session
+
+Heartbeat
+→ Protected System Cron
+→ 读取 HEARTBEAT.md
+→ 适合长期安静检查
+→ Routine Result 可以不通知
 ```
 
-### 10.4.4 Heartbeat 的使用场景
-
-适合：
-
-- 每隔一段时间检查项目状态；
-- 检查“是否有异常/新变化”；
-- 没变化就不要通知。
-
-不适合：
-
-- 用户明确要求“每天 9 点一定发一条提醒”；
-- 一次性未来事件。
-
-这些更适合 Cron。
-
-### 10.4.5 keepRecentMessages 的作用
-
-Heartbeat 有自己的维护 Session/运行历史。保留有限近期消息可以防止后台检查无限增长，同时给后续检查保留必要上下文。
-
----
+因此原版 `keep_recent_messages` 形式的“独立 Heartbeat Service 配置”不再作为 current 主设计。
 
 ## 10.5 三者的协作关系
 
-### 10.5.1 SubAgent、Cron、Heartbeat 对比
+current-source 实际上是四类机制：
 
-| 机制 | 解决的问题 | 触发方式 | 默认是否总通知 |
-|---|---|---|---|
-| Subagent | 当前目标中的并行/隔离工作 | 主 Agent Tool Call | 结果回父任务 |
-| Cron | 确定时间/周期任务 | 时间 | 通常是 |
-| Local Trigger | 外部本地事件 | 显式 trigger command | 作为 Session Turn |
-| Heartbeat | 周期检查但无事不扰 | Protected Cron | 否，有 Notification Gate |
+| 机制 | 触发 | 主要用途 |
+|---|---|---|
+| Subagent | 主 Agent Tool Call | 并行/委托明确子任务 |
+| Cron | 时间调度 | Reminder / Recurring Task |
+| Local Trigger | 本地命令/事件 | CI、Script、Webhook Adapter |
+| Heartbeat | Protected System Cron | 周期安静检查 HEARTBEAT.md |
 
-### 10.5.2 协作场景示例
+共同原则：
 
-ResearchPilot：
-
-```text
-Cron：每周一固定做一次 Corpus Report
-      ↓
-Main Agent
-      ↓
-Spawn Subagents 并行分析新论文
-      ↓
-综合结果
-      ↓
-发送报告
-
-Heartbeat：每 30 分钟检查是否有 Index/Rebuild 异常
-      ↓
-无异常 → 静默
-有异常 → 通知
-
-Local Trigger：Index Build 脚本完成
-      ↓
-触发 Agent 验证新增论文
-```
-
-### 10.5.3 设计模式分析
-
-- Subagent：Task Decomposition / Worker；
-- Cron：Persistent Scheduler；
-- Local Trigger：Event-driven Integration；
-- Heartbeat：Periodic Polling + Notification Gate；
-- AgentLoop Session Queue：Serialization / Admission Control。
-
----
+- Session-bound routing
+- 最小 Tool Scope
+- Concurrency/Iteration 控制
+- Durable Job State
+- Cancellation / Recovery
+- 不依赖 LLM“自觉”防止失控
 
 ## 10.6 实战练习
 
-### 练习 1：使用 SubAgent 并行处理
+### 练习 1：两个 Subagent 并行任务
 
-让主 Agent：
+让主 Agent 分别：
 
-```text
-对 3 篇论文分别分析 Method/Evaluation/Limitations，
-每篇独立处理，最后主 Agent 汇总。
+- 调研一个技术问题
+- 分析一个本地文件
+
+观察 Subagent Status、并发限制和结果注入。
+
+### 练习 2：Cron
+
+创建一个短周期测试 Reminder，观察：
+
+```
+workspace/cron/jobs.json
+workspace/cron/runs/
 ```
 
-记录：
+然后删除 Job。
 
-- Spawn 数量；
-- Running Count；
-- 总 Tool Calls；
-- Wall-clock Latency；
-- 与单 Agent 串行结果对比。
+### 练习 3：Heartbeat
 
-### 练习 2：创建定时任务
+编辑：
 
-创建：
-
-```text
-10 分钟后提醒我检查 Nanobot 学习进度
+```
+workspace/HEARTBEAT.md
 ```
 
-然后：
-
-1. `cron(action=list)`；
-2. 查看 `cron/jobs.json`；
-3. 验证 Job 是否绑定当前 Session；
-4. 到期观察 Delivery。
-
-### 练习 3：配置 Heartbeat
-
-在 `HEARTBEAT.md` 添加：
-
-```markdown
-## Active Tasks
-- Check whether the ResearchPilot index build has failed. Only report failures.
-```
-
-实验时可临时缩短 interval。
-
-重点观察：
-
-- 正常状态是否静默；
-- 异常是否通知；
-- Gateway 停止后 Heartbeat 是否停止。
+增加一个安全、只读 Active Task，启动 Gateway，观察 Routine Result 是否静默。
 
 ### 练习 4：Local Trigger
 
-创建 Trigger 后，从脚本：
-
-```bash
-nanobot trigger <trigger-id> "Index rebuild completed"
-```
-
-观察它如何进入原 Session。
-
----
+创建一个绑定当前 Topic 的 Trigger，然后从 Shell 触发，观察它如何进入对应 Session，而不是新建无关 Conversation。
 
 ## 10.7 面试高频题
 
-### 题目 1：Nanobot 的 SubAgent 系统是怎么设计的？
+### 题目 1：current Subagent 怎么设计？
 
-> "SubagentManager 不再启动完整 AgentLoop，而是复用 AgentRunner/AgentRunSpec，给子任务构造 Focused Prompt 和 Scoped ToolRegistry。它支持 Background Spawn 与 Inline Run，维护 Task Status 和 Session Ownership。current 默认最多并发 4 个 Subagent，并继承统一 Tool Iteration Limit。"
+> SubagentManager 构造 focused execution context，并复用 AgentRunner/AgentRunSpec；支持 background/inline 模式。并发由 maxConcurrentSubagents 控制，结果可以注入主 Session。
 
-### 题目 2：如何防止 Agent 系统中的递归/爆炸？
+### 题目 2：为什么旧版固定 15 次迭代答案已经不对？
 
-> "我会从 Capability Scope、Concurrency、Iteration、Cost 和 Ownership 五层限制。Subagent 只拿需要的 Tool Scope；并发受 maxConcurrentSubagents 控制；每个 Runner 有 maxToolIterations；父子结果有明确 Session/Task ID；再通过 Trace/Eval 判断并行是否真的值得，而不是只靠 Prompt 说‘不要递归’。"
+> current Subagent 的 max_iterations 由 Runtime/AgentLoop 同步，不再使用“固定 15”作为架构常量。真正的资源治理应该同时考虑 iteration、concurrency、timeout、Tool Scope。
 
-### 题目 3：Cron 和 Heartbeat 有什么区别？
+### 题目 3：Cron 现在还基于 APScheduler 吗？
 
-> "Cron 是用户创建的明确 Scheduled Turn，通常每次运行都会回到原 Session；Heartbeat 是 Gateway 管理的 protected System Cron Job，周期读取 HEARTBEAT.md，并通过 Notification Gate 抑制‘没变化’结果。一个强调按时执行，一个强调有事才打扰。"
+> current `CronService` 自己管理持久化 Job/Timer，并使用 croniter 计算 Cron Schedule；不应再按旧 APScheduler 代码回答。
 
-### 题目 4：如果让你设计一个并行任务系统，你会注意什么？
+### 题目 4：Heartbeat 和 Cron 的区别？
 
-重点：
+> current Heartbeat 本身就是 Gateway 注册的受保护 Cron Job，但语义不同：它周期读取 HEARTBEAT.md，并通过 Notification Gate 只报告有价值结果。
 
-- Task Identity；
-- Concurrency Limit；
-- Timeout/Cancel；
-- Side-effect Ordering；
-- Result Correlation；
-- Parent Failure；
-- Retry Idempotency；
-- Trace；
-- Cost Budget。
+### 题目 5：Local Trigger 有什么价值？
 
----
+> 它把 CI/脚本/本地事件安全地路由到一个已绑定 Session，让 Automations 不只依赖时间触发。
 
 ## 10.8 本章小结
 
-```text
-Subagent = 当前任务分解
-Cron = 未来时间执行
-Local Trigger = 外部事件驱动
-Heartbeat = 周期检查 + 无变化静默
+### 核心概念图
+
+```
+┌──────────────────────────────────────────────────┐
+│             Nanobot 并发与调度体系                 │
+│                                                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │              主Agent (Main Agent)          │  │
+│  │  max_tool_iterations: 40                   │  │
+│  │  完整工具集                                 │  │
+│  │                                            │  │
+│  │  ┌──────┐  ┌──────┐  ┌──────────────────┐ │  │
+│  │  │spawn │  │ cron │  │ 其他工具...       │ │  │
+│  │  └──┬───┘  └──┬───┘  └──────────────────┘ │  │
+│  └─────┼────────┼────────────────────────────┘  │
+│        │        │                                │
+│   ┌────▼───┐  ┌─▼──────────────┐                │
+│   │SubAgent│  │  CronService   │                │
+│   │Manager │  │  (APScheduler) │                │
+│   │        │  │                │                │
+│   │ iter:15│  │ cron_expr      │                │
+│   │ 受限   │  │ every_seconds  │                │
+│   │ 工具集 │  │ at             │                │
+│   └───┬────┘  └───────┬───────┘                │
+│       │               │                         │
+│       │    ┌──────────▼──────────┐              │
+│       └───→│    MessageBus       │              │
+│            │   (结果回报通道)     │              │
+│            └─────────────────────┘              │
+│                                                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │           HeartbeatService                 │  │
+│  │  interval_s: 1800                          │  │
+│  │  keep_recent_messages: 5                   │  │
+│  │  定期唤醒Agent，Agent自主决策              │  │
+│  └────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────┘
 ```
 
-四者最终都要回到同一件事：
+### 面试记忆清单
 
-> **把任务正确地纳入 Session、Tool、Delivery 和 Runtime 生命周期，而不是额外开几个异步函数就算完成。**
+| 考点 | 一句话回答 |
+|------|-----------|
+| SubAgent 启动 | spawn 工具启动，SubagentManager 管理 |
+| SubAgent 限制 | 15 次迭代，无 message/spawn/cron 工具 |
+| SubAgent 回报 | 通过 MessageBus 发 InboundMessage 回主会话 |
+| Cron 引擎 | 基于 APScheduler |
+| Cron 配置 | every_seconds / cron_expr+tz / at |
+| Cron 防递归 | cron 上下文中禁止创建新 cron |
+| Heartbeat | 周期唤醒 Agent，Agent 自主决策 |
+| keep_recent_messages | 心跳时只保留最近 N 条消息 |
+| 核心原则 | 受控并行 + 防递归 + 最小权限 |
 
 ---
 
-## 下一章
-
-➡️ [11 - 安全与部署](../11-security-deploy-observability/README.md)
+> **下一章**：[11 - 安全与部署](../11-security-and-deploy/README.md) —— 生产环境的安全策略和 Docker 部署实践
