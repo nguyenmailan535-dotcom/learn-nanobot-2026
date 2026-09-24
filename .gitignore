@@ -1,23 +1,25 @@
-# Python
-__pycache__/
-*.py[cod]
+.worktrees/
+.assets
+.docs
+.env
+*.pyc
+dist/
+build/
+*.egg-info/
+*.egg
+*.pycs
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzz
 .venv/
 venv/
-
-# Secrets / local config
-.env
-.env.*
-config.local.json
-
-# IDE
-.idea/
-.vscode/
-
-# OS
+__pycache__/
+poetry.lock
+.pytest_cache/
+botpy.log
+nano.*.save
 .DS_Store
-Thumbs.db
-
-# Generated eval / local corpora
-data/papers/
-data/index/
-logs/
+uv.lock
