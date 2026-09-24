@@ -2,7 +2,7 @@
 
 > 一份面向 **2026 年 Agent / AI 应用 / AI 平台实习** 的 Nanobot 学习仓库。
 >
-> 本仓库以 **2026-09-24 的 `HKUDS/nanobot` `main`** 为学习基线，借鉴 `learn-nanobot` 的 4 Phase / 17 章课程骨架，但内容、实验、源码路径、命令、项目和面试题全部重新设计。
+> 本仓库以 **2026-09-24 的 `HKUDS/nanobot` `main`** 为学习基线。第 1-11 章直接复用原版 `learn-nanobot` 的章节架构和仍然有效的正文，只改动与 current-source 不符的 Nanobot 实现细节；第 12 章替换为定制 ResearchPilot Capstone；第 13-14 章保留原版对后端/Agent 求职仍有价值的内容，并补充 2026-09 的 current-source 与工程实践。第 15-17 章保持原版。
 
 ## 这份仓库为谁准备
 
@@ -88,15 +88,15 @@ flowchart LR
 | 06 | current source 安装、config/workspace/session | 本机跑通 `main` |
 | 07 | Session / AutoCompact / Consolidation / Dream | 跨 session memory 实验 |
 | 08 | Tools / Skills / Agent Plugins | 自定义 Skill + Plugin |
-| 09 | MCP 实战 | 自己接入 / 开发一个 MCP Server |
-| 10 | Channels / Subagent / Automations | Gateway + 外部入口 + 后台任务 |
+| 09 | 多平台接入 | MessageBus / ChannelManager / Pairing / Feishu Long Connection |
+| 10 | Subagent / Cron / Heartbeat | 后台任务、定时任务、Local Trigger 与 current Heartbeat |
 
 ### Phase 3：项目实战
 
 | 章 | 内容 | 产出 |
 |---|---|---|
-| 11 | Security / Deploy / Observability | 可部署、可审计、可限制权限 |
-| 12 | Capstone：Research Agent | Nanobot × Multi-paper RAG × Eval |
+| 11 | Security / Deploy | Workspace Guard、Sandbox、SSRF、Pairing、Gateway 部署 |
+| 12 | 定制 Capstone：ResearchPilot | Nanobot × MCP × Multi-paper RAG × Eval × Backend Engineering |
 
 ### Phase 4：求职冲刺
 
@@ -118,20 +118,20 @@ learn-nanobot-2026/
 ├── CHANGELOG.md
 ├── LICENSE
 ├── docs/
-│   ├── 01-agent-foundations/
-│   ├── 02-nanobot-current-overview/
-│   ├── 03-runtime-architecture/
+│   ├── 01-what-is-agent/
+│   ├── 02-nanobot-overview/
+│   ├── 03-architecture-deep-dive/
 │   ├── 04-source-code-walkthrough/
 │   ├── 05-mcp-protocol/
-│   ├── 06-current-source-setup/
-│   ├── 07-memory-and-dream/
-│   ├── 08-skills-tools-plugins/
-│   ├── 09-mcp-integration/
-│   ├── 10-channels-subagents-automations/
-│   ├── 11-security-deploy-observability/
-│   ├── 12-research-agent-capstone/
-│   ├── 13-interview-guide/
-│   ├── 14-job-readiness-map/
+│   ├── 06-install-and-hands-on/
+│   ├── 07-memory-system/
+│   ├── 08-skills-and-tools/
+│   ├── 09-multi-platform/
+│   ├── 10-subagent-and-cron/
+│   ├── 11-security-and-deploy/
+│   ├── 12-nanobot-real-projects/
+│   ├── 13-interview-bagua/
+│   ├── 14-job-market-analysis/
 │   ├── 15-resume-template/
 │   ├── 16-star-interview/
 │   └── 17-learning-resources/
@@ -186,4 +186,4 @@ learn-nanobot-2026/
 - Official docs: https://github.com/HKUDS/nanobot/tree/main/docs
 - Original learning-repo inspiration: https://github.com/bcefghj/learn-nanobot
 
-本仓库不复制旧教程正文；仅借鉴课程分阶段的组织方式，并针对 current-source 重写。
+本仓库第 1-11、13-14 章以原版 `learn-nanobot` 正文为基础进行 current-source 校正与补充；第 12 章为定制项目。所有 Nanobot 源码结论以 2026-09-24 的 `HKUDS/nanobot` `main` 为准。
