@@ -1,737 +1,922 @@
-# 03 - Nanobot Runtime 架构深入解析
+# 03 - 架构深入解析
 
-> 🎯 **本章目标**：深入理解 current-source 的核心分层、一次用户 Turn 的生命周期、AgentLoop/AgentRunner 边界、Context/Session/Tool/Memory 的协作方式，以及当前的并发模型。  
-> **源码基线**：HKUDS/nanobot main，2026-09-24 学习快照。
+> 🎯 **本章目标**：深入理解 Nanobot 的五层架构、四大核心模块、数据流以及 10 个关键设计模式。这一章是面试中展现"技术深度"的核心素材。
 
 ---
 
 ## 目录
 
-- [3.1 架构总览](#31-架构总览)
-- [3.2 MessageBus 与事件模型](#32-messagebus-与事件模型)
-- [3.3 AgentLoop：面向用户 Turn 的编排层](#33-agentloop面向用户-turn-的编排层)
-- [3.4 一个 Turn 的七阶段 Pipeline](#34-一个-turn-的七阶段-pipeline)
-- [3.5 AgentRunner：面向模型的 Provider/Tool Loop](#35-agentrunner面向模型的-providertool-loop)
-- [3.6 ContextBuilder：模型到底看见什么](#36-contextbuilder模型到底看见什么)
-- [3.7 ToolRegistry 与 ToolLoader](#37-toolregistry-与-toolloader)
-- [3.8 Session、Compaction 与 Memory](#38-sessioncompaction-与-memory)
-- [3.9 Workspace Scope](#39-workspace-scope)
-- [3.10 并发模型](#310-并发模型)
-- [3.11 Hooks、Events 与 Delivery](#311-hooksevents-与-delivery)
-- [3.12 关键设计模式](#312-关键设计模式)
-- [3.13 如何定位 Bug](#313-如何定位-bug)
-- [3.14 面试高频题](#314-面试高频题)
-- [3.15 本章总结](#315-本章总结)
+- [3.1 整体架构概览](#31-整体架构概览)
+- [3.2 四大核心模块详解](#32-四大核心模块详解)
+- [3.3 数据流图](#33-数据流图)
+- [3.4 模块间的协作关系](#34-模块间的协作关系)
+- [3.5 关键设计模式](#35-关键设计模式)
+- [3.6 架构对比](#36-架构对比)
+- [3.7 面试高频题](#37-面试高频题)
+- [3.8 本章总结](#38-本章总结)
 
 ---
 
-## 3.1 架构总览
+## 3.1 整体架构概览
 
-官方 docs/architecture.md 给出的主链：
+### 五层架构
 
-~~~text
-Channel
-  ↓
-MessageBus / InboundMessage
-  ↓
-AgentLoop
-  ↓
-AgentRunner
-  ↔ Provider
-  ↔ Tools
-  ↓
-AgentLoop
-  ↓
-MessageBus / OutboundMessage
-  ↓
-Channel
-~~~
+Nanobot 的架构可以清晰地划分为五个层次，从上到下分别是：
 
-可以进一步分成五层：
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│  Layer 5: UI 层 (User Interface)                                │
+│  ┌──────────┬──────────┬────────┬────────┬───────┬──────────┐  │
+│  │ Telegram │ Discord  │  飞书  │  钉钉  │ 微信  │   Web    │  │
+│  └────┬─────┴────┬─────┴───┬────┴───┬────┴──┬────┴────┬─────┘  │
+│       │          │         │        │       │         │         │
+│═══════╪══════════╪═════════╪════════╪═══════╪═════════╪═════════│
+│       │          │         │        │       │         │         │
+│  Layer 4: Gateway 层 (消息网关)                                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │           ChannelManager + MessageBus                   │    │
+│  │   ┌──────────────────┐  ┌──────────────────────┐       │    │
+│  │   │  Inbound Queue   │  │   Outbound Queue     │       │    │
+│  │   │  (用户消息入队)   │  │   (回复消息出队)      │       │    │
+│  │   └────────┬─────────┘  └──────────┬───────────┘       │    │
+│  └────────────┼────────────────────────┼───────────────────┘    │
+│               │                        │                        │
+│═══════════════╪════════════════════════╪════════════════════════│
+│               │                        ↑                        │
+│  Layer 3: Core Agent 层 (核心智能体)                             │
+│  ┌────────────▼────────────────────────┼───────────────────┐    │
+│  │                                     │                   │    │
+│  │   ┌──────────────┐   ┌─────────────┴──┐                │    │
+│  │   │  AgentLoop   │──→│  AgentRunner   │                │    │
+│  │   │  (消息消费)   │   │  (ReAct循环)   │                │    │
+│  │   └──────────────┘   └───────┬────────┘                │    │
+│  │                              │                          │    │
+│  │         ┌────────────────────┼────────────────┐         │    │
+│  │         │                    │                │         │    │
+│  │   ┌─────▼──────┐   ┌───────▼────────┐  ┌────▼─────┐  │    │
+│  │   │ContextBuilder│ │  MemoryStore   │  │SubAgent  │  │    │
+│  │   │(上下文构建)  │  │  (记忆管理)    │  │Manager   │  │    │
+│  │   └─────────────┘  └───────────────┘  └──────────┘  │    │
+│  │                                                      │    │
+│  └──────────────────────────────────────────────────────┘    │
+│               │                                              │
+│═══════════════╪══════════════════════════════════════════════│
+│               │                                              │
+│  Layer 2: Provider 层 (LLM 提供者)                            │
+│  ┌────────────▼──────────────────────────────────────────┐   │
+│  │  ┌────────┐ ┌─────────┐ ┌────────┐ ┌──────────────┐  │   │
+│  │  │ OpenAI │ │Anthropic│ │DeepSeek│ │  Ollama/...  │  │   │
+│  │  └────────┘ └─────────┘ └────────┘ └──────────────┘  │   │
+│  └───────────────────────────────────────────────────────┘   │
+│               │                                              │
+│═══════════════╪══════════════════════════════════════════════│
+│               │                                              │
+│  Layer 1: Tool 层 (工具执行)                                  │
+│  ┌────────────▼──────────────────────────────────────────┐   │
+│  │  ┌───────────────┐  ┌──────────────────────────────┐  │   │
+│  │  │  Built-in Tools│  │       MCP Tools              │  │   │
+│  │  │  ·MessageTool  │  │  ·MCPToolWrapper             │  │   │
+│  │  │  ·SpawnTool    │  │  ·mcp_{server}_{tool}        │  │   │
+│  │  │  ·save_memory  │  │  ·远程/本地 MCP Server       │  │   │
+│  │  └───────────────┘  └──────────────────────────────┘  │   │
+│  └───────────────────────────────────────────────────────┘   │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
 
-~~~text
-┌───────────────────────────────────────────────┐
-│ Surface: CLI / WebUI / Chat Apps / API / SDK │
-├───────────────────────────────────────────────┤
-│ Transport: Channels / MessageBus              │
-├───────────────────────────────────────────────┤
-│ Turn: AgentLoop / TurnContext / Delivery      │
-├───────────────────────────────────────────────┤
-│ Execution: AgentRunner / Provider / Tools      │
-├───────────────────────────────────────────────┤
-│ State: Session / Memory / Skills / Workspace  │
-└───────────────────────────────────────────────┘
-~~~
+### 各层职责说明
 
-旧版教程常把“AgentLoop 是心脏”作为核心结论。现在更重要的是：
+| 层次 | 名称 | 核心职责 | 关键组件 |
+|------|------|----------|----------|
+| **Layer 5** | UI 层 | 面向用户的交互界面 | Telegram/Discord/飞书/钉钉/微信等 Channel 适配器 |
+| **Layer 4** | Gateway 层 | 消息的统一收发 | MessageBus（双队列）、ChannelManager |
+| **Layer 3** | Core Agent 层 | 核心推理和决策 | AgentLoop、AgentRunner、ContextBuilder、MemoryStore、SubagentManager |
+| **Layer 2** | Provider 层 | LLM 调用封装 | OpenAI/Anthropic/DeepSeek 等 Provider |
+| **Layer 1** | Tool 层 | 工具注册与执行 | ToolRegistry、MCPToolWrapper、内置工具 |
 
-> **看清每一层的 ownership，而不是找一个万能核心类。**
+### 架构设计原则
 
----
+Nanobot 的架构遵循以下核心原则：
 
-## 3.2 MessageBus 与事件模型
+**1. 关注点分离（Separation of Concerns）**
 
-源码：
+每一层只负责自己的职责，层与层之间通过明确的接口交互。Channel 不需要知道 AgentLoop 的实现细节，AgentLoop 不需要知道消息来自哪个平台。
 
-~~~text
-nanobot/bus/events.py
-nanobot/bus/queue.py
-nanobot/bus/outbound_events.py
-nanobot/bus/runtime_events.py
-~~~
+**2. 依赖倒置（Dependency Inversion）**
 
-### 3.2.1 InboundMessage
+高层模块不依赖低层模块的具体实现，而是依赖抽象接口。例如 AgentRunner 不直接依赖 OpenAI SDK，而是通过 Provider 抽象层调用 LLM。
 
-所有 Channel 进入 Core 前都应该转换为统一 InboundMessage。
+**3. 单一职责（Single Responsibility）**
 
-典型信息包括：
-
-~~~text
-channel
-sender_id
-chat_id
-content
-media
-metadata
-session_key
-~~~
-
-这样 AgentLoop 不需要知道 Telegram Update 或 Feishu SDK Event 的原始类型。
-
-### 3.2.2 为什么需要 MessageBus
-
-如果 Channel 直接调用 Agent：
-
-~~~text
-Telegram → Agent
-Feishu   → Agent
-WebUI    → Agent
-~~~
-
-平台层会逐渐依赖 session/runtime/tool 细节。
-
-使用 MessageBus：
-
-~~~text
-Telegram ─┐
-Feishu   ─┼→ InboundMessage → Agent Core
-WebUI    ─┘
-~~~
-
-实现 transport/core 解耦。
-
----
-
-## 3.3 AgentLoop：面向用户 Turn 的编排层
-
-源码：
-
-~~~text
-nanobot/agent/loop.py
-~~~
-
-current-source 中 AgentLoop 拥有或协调：
-
-- ModelRuntimeResolver；
-- ContextBuilder；
-- SessionManager；
-- ToolRegistry；
-- AgentRunner；
-- Consolidator；
-- SubagentManager；
-- AutoCompact；
-- per-session pending queues；
-- WorkspaceScopeResolver；
-- TurnDelivery；
-- CommandRouter。
-
-构造阶段可以理解为：
-
-~~~text
-AgentLoop
-├── ContextBuilder
-├── SessionManager
-├── ToolRegistry
-├── AgentRunner
-├── Consolidator
-├── SubagentManager
-├── AutoCompact
-└── CommandRouter
-~~~
-
-### 3.3.1 caller-owned ToolRegistry
-
-current AgentLoop.from_config 明确要求 caller 提供 ToolRegistry。
-
-原因是 application composition root 需要共享：
-
-~~~text
-ToolRegistry
-├── AgentLoop
-└── MCPProvider
-~~~
-
-所以 MCP connection lifecycle 不属于 AgentLoop。
-
-这是一条非常重要的 current-source 事实。
+每个类只负责一件事：AgentLoop 负责消息消费和会话管理，AgentRunner 负责 ReAct 循环，ContextBuilder 负责构建 prompt，MemoryStore 负责记忆读写。
 
 ---
 
-## 3.4 一个 Turn 的七阶段 Pipeline
+![Nanobot 架构漫画](../../comics/02-nanobot-architecture.png)
 
-AgentLoop._process_message 创建 TurnContext 后，会明确执行：
+*Nanobot 四大核心模块：AgentLoop（核心引擎）、ToolRegistry（工具注册表）、MEMORY.md（长期记忆）、SkillLoader（技能加载器）*
 
-~~~text
-restore
-  ↓
-compact
-  ↓
-command
-  ↓
-build
-  ↓
-run
-  ↓
-save
-  ↓
-respond
-~~~
+## 3.2 四大核心模块详解
 
-源码结构概念上：
+### 3.2.1 AgentLoop（智能体循环）——核心推理引擎
 
-~~~python
-await self._run_turn_stage(ctx, "restore", self._restore_turn)
-await self._run_turn_stage(ctx, "compact", self._compact_session)
+AgentLoop 是 Nanobot 的"心脏"，它负责：
+- 从 MessageBus 的 Inbound Queue 消费消息
+- 管理会话级别的串行执行（会话锁）
+- 控制全局并发数（并发闸门）
+- 创建 AgentRunner 来处理每个消息
+- 保存每轮对话（_save_turn）
 
-if await self._run_turn_stage(ctx, "command", self._dispatch_command):
-    return ctx.outbound
+```
+┌─────────────────────────────────────────────────────────┐
+│                    AgentLoop 工作机制                     │
+│                                                         │
+│  MessageBus (Inbound Queue)                             │
+│  ┌──────────────────────────────┐                       │
+│  │ msg1 │ msg2 │ msg3 │ ...    │                       │
+│  └──┬───────────────────────────┘                       │
+│     │                                                   │
+│     ▼                                                   │
+│  run() ─── 持续消费消息                                  │
+│     │                                                   │
+│     ├── 获取会话锁 (_session_locks)                      │
+│     │   └── 确保同一会话的消息串行处理                     │
+│     │                                                   │
+│     ├── 获取并发闸门 (_concurrency_gate)                  │
+│     │   └── 默认最多 3 个并发会话                         │
+│     │                                                   │
+│     ├── 创建 AgentRunner                                │
+│     │   └── 传入 provider, workspace, tools 等           │
+│     │                                                   │
+│     ├── AgentRunner.run()                               │
+│     │   └── ReAct 循环（详见 3.2.2）                     │
+│     │                                                   │
+│     ├── _save_turn() 持久化                              │
+│     │   └── 保存到 HISTORY.md                           │
+│     │                                                   │
+│     └── 发送响应到 Outbound Queue                        │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
 
-await self._run_turn_stage(ctx, "build", self._build_turn)
-await self._run_turn_stage(ctx, "run", self._run_turn)
-await self._run_turn_stage(ctx, "save", self._persist_turn)
-await self._run_turn_stage(ctx, "respond", self._prepare_outbound)
-~~~
+**关键设计决策**：
 
-### Stage 1：restore
+| 决策 | 设计 | 原因 |
+|------|------|------|
+| 会话锁 | `_session_locks[session_id]` | 防止同一用户的多条消息并发处理导致上下文混乱 |
+| 并发闸门 | `asyncio.Semaphore(3)` | 控制全局并发，防止过多请求打垮 LLM API |
+| 最大迭代 | 主 Agent 40 次，子 Agent 15 次 | 防止无限循环，同时给予足够的迭代空间 |
+| 工具注册 | `_register_default_tools()` | 启动时注册内置工具，支持运行时动态添加 |
 
-负责：
+### 3.2.2 AgentRunner（ReAct 循环）——迭代执行器
 
-- normalize attachment；
-- get/create Session；
-- 根据 session policy 缩减 tools；
-- restore runtime checkpoint/interruption；
-- remember delivery route；
-- persist workspace scope。
+AgentRunner 实现了完整的 ReAct 循环，它是 Agent "思考-行动-观察" 的执行者。
 
-### Stage 2：compact
+```
+┌─────────────────────────────────────────────────────────┐
+│                 AgentRunner 执行流程                      │
+│                                                         │
+│  ┌─────────────────────────────────────────────┐        │
+│  │            for i in range(max_iterations):  │        │
+│  │                                             │        │
+│  │  ┌──────────────────────┐                   │        │
+│  │  │ before_iteration()   │  ← Lifecycle Hook │        │
+│  │  └──────────┬───────────┘                   │        │
+│  │             ↓                               │        │
+│  │  ┌──────────────────────┐                   │        │
+│  │  │ provider.chat_with_  │                   │        │
+│  │  │ retry(messages,tools)│  ← 调用 LLM      │        │
+│  │  └──────────┬───────────┘                   │        │
+│  │             ↓                               │        │
+│  │  ┌──────────────────────┐                   │        │
+│  │  │ 有 tool_calls?       │                   │        │
+│  │  └──────┬──────┬────────┘                   │        │
+│  │     Yes │      │ No                         │        │
+│  │         ↓      ↓                            │        │
+│  │  ┌──────────┐  ┌────────────┐               │        │
+│  │  │before_   │  │ 任务完成   │               │        │
+│  │  │execute_  │  │ break 退出 │               │        │
+│  │  │tools()   │  └────────────┘               │        │
+│  │  └────┬─────┘                               │        │
+│  │       ↓                                     │        │
+│  │  ┌──────────────────────┐                   │        │
+│  │  │ ToolRegistry.execute │                   │        │
+│  │  │ (逐一执行工具调用)    │                   │        │
+│  │  └──────────┬───────────┘                   │        │
+│  │             ↓                               │        │
+│  │  ┌──────────────────────┐                   │        │
+│  │  │ 截断工具结果          │                   │        │
+│  │  │ (>16000字符时截断)   │                   │        │
+│  │  └──────────┬───────────┘                   │        │
+│  │             ↓                               │        │
+│  │  ┌──────────────────────┐                   │        │
+│  │  │ after_iteration()    │  ← Lifecycle Hook │        │
+│  │  └──────────┬───────────┘                   │        │
+│  │             │                               │        │
+│  │             └── 继续循环 ──────────→ 下一轮  │        │
+│  │                                             │        │
+│  └─────────────────────────────────────────────┘        │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
 
-调用 AutoCompact.prepare_session，取可能存在的 pending session summary。
+**Lifecycle Hooks 详解**：
 
-### Stage 3：command
+| Hook | 触发时机 | 用途 |
+|------|----------|------|
+| `before_iteration` | 每轮迭代开始前 | 可用于日志记录、状态检查 |
+| `before_execute_tools` | 工具执行前 | 可用于工具调用审查、安全检查 |
+| `after_iteration` | 每轮迭代结束后 | 可用于结果记录、指标统计 |
 
-处理 slash commands。
+**工具结果截断**：
 
-为什么在 build 前？
+AgentRunner 有一个重要的优化——`_TOOL_RESULT_MAX_CHARS = 16000`。当工具返回的结果超过 16000 个字符时，会被截断。这是因为：
+- 过长的工具结果会占用大量上下文窗口
+- LLM 处理超长文本的效果会下降
+- 可以节省 Token 成本
 
-因为很多 command 根本不需要进入模型。
+### 3.2.3 MemoryStore（记忆系统）——MEMORY.md + HISTORY.md
 
-### Stage 4：build
+MemoryStore 管理 Nanobot 的双层记忆系统。
 
-这里会：
+```
+┌─────────────────────────────────────────────────────────┐
+│                  记忆系统架构                              │
+│                                                         │
+│  ┌─────────────────────────────────────────────┐        │
+│  │              MemoryStore                    │        │
+│  │                                             │        │
+│  │  ┌────────────────┐   ┌────────────────┐   │        │
+│  │  │  read_memory() │   │  save_memory() │   │        │
+│  │  │  读取MEMORY.md │   │  写入MEMORY.md │   │        │
+│  │  └────────────────┘   └────────────────┘   │        │
+│  │                                             │        │
+│  │  ┌────────────────┐   ┌─────────────────┐  │        │
+│  │  │ append_history()│  │MemoryConsolidator│  │        │
+│  │  │ 追加HISTORY.md │   │ 压缩旧历史记录   │  │        │
+│  │  └────────────────┘   └─────────────────┘  │        │
+│  └─────────────────────────────────────────────┘        │
+│                                                         │
+│  ┌─────────────────┐    ┌─────────────────┐             │
+│  │   MEMORY.md     │    │   HISTORY.md    │             │
+│  │                 │    │                 │             │
+│  │ 结构化长期记忆   │    │ 完整交互历史     │             │
+│  │                 │    │                 │             │
+│  │ ·用户偏好       │    │ ·时间戳         │             │
+│  │ ·项目信息       │    │ ·用户消息摘要    │             │
+│  │ ·重要决策       │    │ ·Agent回复摘要   │             │
+│  │ ·学到的教训     │    │ ·工具调用记录    │             │
+│  │                 │    │                 │             │
+│  │ 由 save_memory  │    │ 自动追加        │             │
+│  │ 虚拟工具触发写入 │    │ 定期压缩        │             │
+│  └─────────────────┘    └─────────────────┘             │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
 
-- resolve runtime；
-- get session history；
-- build RequestContext；
-- resolve RuntimeContextBlock；
-- prepare provider state / transcript input。
+**save_memory 虚拟工具的巧妙设计**：
 
-### Stage 5：run
+`save_memory` 不是一个真正的外部工具——它不调用任何 API 或启动任何进程。当 LLM 决定调用 `save_memory` 时，AgentRunner 直接在内部拦截这个调用，将内容写入 MEMORY.md 文件。
 
-进入 AgentRunner。
+这种"虚拟工具"设计的好处：
+- 对 LLM 来说，它和其他工具没有区别（统一的调用接口）
+- 执行效率高（无网络开销）
+- 实现简单（直接文件 I/O）
 
-### Stage 6：save
+**MemoryConsolidator 压缩机制**：
 
-把本轮 durable state 持久化回 Session。
+当 HISTORY.md 增长到一定大小时，MemoryConsolidator 会：
+1. 读取较旧的历史记录
+2. 使用 LLM 生成压缩摘要
+3. 用摘要替换详细记录
+4. 保留近期的详细记录
 
-### Stage 7：respond
+这确保了记忆文件不会无限增长，同时保留了重要的历史信息。
 
-构造 OutboundMessage 和 streaming completion 语义。
+### 3.2.4 MessageBus（消息总线）——双队列架构
 
-### 3.4.1 为什么 stage pipeline 值得学
+MessageBus 是 Nanobot 的消息中枢，使用经典的**生产者-消费者模式**。
 
-它直接形成故障定位表：
+```
+┌─────────────────────────────────────────────────────────┐
+│                   MessageBus 架构                        │
+│                                                         │
+│  生产者 (Channels)              消费者 (AgentLoop)       │
+│  ┌──────────┐                   ┌──────────────┐        │
+│  │ Telegram │──┐                │              │        │
+│  │ Channel  │  │  ┌──────────┐  │  AgentLoop   │        │
+│  └──────────┘  ├─→│ Inbound  │─→│  .run()      │        │
+│  ┌──────────┐  │  │  Queue   │  │              │        │
+│  │ Discord  │──┤  └──────────┘  └──────┬───────┘        │
+│  │ Channel  │  │                       │                │
+│  └──────────┘  │                       │                │
+│  ┌──────────┐  │                       ↓                │
+│  │ 飞书     │──┘                ┌──────────────┐        │
+│  │ Channel  │                   │  AgentRunner │        │
+│  └──────────┘                   │  (处理消息)   │        │
+│       ↑                         └──────┬───────┘        │
+│       │                                │                │
+│       │       ┌──────────┐             │                │
+│       └───────│ Outbound │←────────────┘                │
+│               │  Queue   │                              │
+│               └──────────┘                              │
+│                                                         │
+│  消息类型:                                               │
+│  · InboundMessage  = 用户发来的消息                       │
+│  · OutboundMessage = Agent 要回复的消息                    │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
 
-| 问题 | 优先看 |
-|---|---|
-| Session 恢复错 | restore |
-| Prompt 组装错 | build |
-| Tool loop 错 | run |
-| 对话没保存 | save |
-| 平台没收到 | respond / channel |
+**关键设计**：
+
+| 设计 | 实现 | 作用 |
+|------|------|------|
+| 双队列 | Inbound + Outbound | 解耦消息收发，Channel 和 Agent 互不阻塞 |
+| 异步队列 | `asyncio.Queue` | 非阻塞的消息传递，高并发支持 |
+| 统一消息格式 | `InboundMessage` / `OutboundMessage` | 屏蔽平台差异，Agent 不关心消息来源 |
+| 会话标识 | `session_id` | 标识消息所属会话，用于会话锁定 |
 
 ---
 
-## 3.5 AgentRunner：面向模型的 Provider/Tool Loop
+## 3.3 数据流图
 
-源码：
+### 完整消息处理流程
 
-~~~text
-nanobot/agent/runner.py
-~~~
+下面描述一条用户消息从发出到收到回复的完整数据流：
 
-类注释直接写：
-
-> Run a tool-capable LLM loop without product-layer concerns.
-
-也就是：
-
-> Runner 不应该关心 Telegram、WebUI、具体 Session 页面，它只负责一次 model/tool execution。
-
-### 3.5.1 AgentRunSpec
-
-Loop → Runner 的运行契约。
-
-关键字段包括：
-
-~~~text
-initial_messages / transcript_input
-tools
-runtime
-max_iterations
-max_tool_result_chars
-hook
-concurrent_tools
-workspace
-session_key
-checkpoint_callback
-consolidate_history
-injection_callback
-continuation_callback
-provider_state
-~~~
-
-这说明 Runner 不是简单的 run(messages)。
-
-### 3.5.2 run
-
-AgentRunner.run 大致负责：
-
-1. 构造 initial transcript/compaction state；
-2. hook.before_run；
-3. 进入 _run_core；
-4. 形成 AgentRunResult；
-5. after/error/finally hooks。
-
-### 3.5.3 Tool Loop
-
-核心仍然是：
-
-~~~text
-messages
-  ↓
-provider
-  ↓
-assistant message
-  ├─ final text → stop
-  └─ tool calls
-       ↓
-    execute tools
-       ↓
-    tool results
-       ↓
-    append
-       ↓
-    provider again
-~~~
-
-但 current Runner 还处理：
-
-- streaming；
-- provider conversation state；
-- context compaction；
-- injected follow-ups；
-- tool result governance；
-- max iterations；
-- checkpoint；
-- cancellation。
-
----
-
-## 3.6 ContextBuilder：模型到底看见什么
-
-源码：
-
-~~~text
-nanobot/agent/context.py
-~~~
-
-current class 中有：
-
-~~~python
-BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md"]
-~~~
-
-这是很重要的 source-level 事实。
-
-### System Prompt 并不是一个固定字符串
-
-概念上，它会组合：
-
-~~~text
-runtime/tool contract
-+ bootstrap identity
-+ project instructions
-+ durable memory
-+ skills summary
-+ session summary
-+ runtime context
-+ current user input
-~~~
-
-并且来源还可能分属于：
-
-~~~text
-agent workspace
-project workspace
-current session
-runtime provider
-~~~
-
-### build_system_prompt 与 transcript
-
-你后面源码走读要重点追：
-
-~~~text
-TranscriptInput
-→ ContextBuilder.build_transcript
-→ AgentRunSpec
-~~~
-
-而不是只盯一个 system prompt 字符串。
+```
+步骤 1: 用户发送消息
+┌──────────────────────────────────────────────────────────┐
+│ 用户在 Telegram 发送: "帮我查一下北京天气"                   │
+└──────────────────────────┬───────────────────────────────┘
+                           ↓
+步骤 2: Channel 接收并转换
+┌──────────────────────────────────────────────────────────┐
+│ TelegramChannel.on_message()                             │
+│ → 将 Telegram 消息转换为 InboundMessage                   │
+│ → InboundMessage {                                       │
+│     session_id: "tg_12345",                              │
+│     user_id: "user_001",                                 │
+│     text: "帮我查一下北京天气",                             │
+│     channel: "telegram",                                 │
+│     timestamp: 1711958400                                │
+│   }                                                      │
+└──────────────────────────┬───────────────────────────────┘
+                           ↓
+步骤 3: 进入 Inbound Queue
+┌──────────────────────────────────────────────────────────┐
+│ MessageBus.inbound.put(inbound_message)                  │
+└──────────────────────────┬───────────────────────────────┘
+                           ↓
+步骤 4: AgentLoop 消费消息
+┌──────────────────────────────────────────────────────────┐
+│ AgentLoop.run():                                         │
+│ → msg = await bus.inbound.get()                          │
+│ → 获取会话锁: _session_locks["tg_12345"]                  │
+│ → 获取并发闸门: _concurrency_gate.acquire()               │
+│ → 加载 workspace 上下文                                   │
+└──────────────────────────┬───────────────────────────────┘
+                           ↓
+步骤 5: ContextBuilder 构建 Prompt
+┌──────────────────────────────────────────────────────────┐
+│ ContextBuilder.build_system_prompt():                    │
+│ → Identity: "你是一个 AI 助手..."                         │
+│ → Bootstrap: 基础行为规范                                 │
+│ → Memory: 读取 MEMORY.md 的内容                           │
+│ → Skills: 加载匹配的 SKILL.md                             │
+│                                                          │
+│ ContextBuilder.build_messages():                         │
+│ → [system_prompt] + [history] + [user_message]           │
+└──────────────────────────┬───────────────────────────────┘
+                           ↓
+步骤 6: AgentRunner ReAct 循环
+┌──────────────────────────────────────────────────────────┐
+│ 第 1 轮迭代:                                              │
+│ → LLM: "用户想查北京天气，我需要调用天气工具"               │
+│ → tool_call: weather_api(city="北京")                     │
+│ → 工具返回: {"temp": 22, "weather": "晴"}                 │
+│                                                          │
+│ 第 2 轮迭代:                                              │
+│ → LLM: "我已经得到天气数据，可以回复用户了"                 │
+│ → text: "北京今天天气晴朗，气温 22°C，适合外出。"           │
+│ → 没有 tool_calls，循环结束                                │
+└──────────────────────────┬───────────────────────────────┘
+                           ↓
+步骤 7: 保存记忆和历史
+┌──────────────────────────────────────────────────────────┐
+│ MemoryStore.append_history():                            │
+│ → 将本轮对话摘要追加到 HISTORY.md                         │
+│                                                          │
+│ AgentLoop._save_turn():                                  │
+│ → 持久化本轮对话数据                                      │
+└──────────────────────────┬───────────────────────────────┘
+                           ↓
+步骤 8: 发送响应
+┌──────────────────────────────────────────────────────────┐
+│ MessageBus.outbound.put(outbound_message)                │
+│ → OutboundMessage {                                      │
+│     session_id: "tg_12345",                              │
+│     text: "北京今天天气晴朗，气温 22°C，适合外出。",        │
+│     channel: "telegram"                                  │
+│   }                                                      │
+└──────────────────────────┬───────────────────────────────┘
+                           ↓
+步骤 9: Channel 发送回复
+┌──────────────────────────────────────────────────────────┐
+│ TelegramChannel.send():                                  │
+│ → 将 OutboundMessage 转换为 Telegram API 请求             │
+│ → 发送到 Telegram 服务器                                  │
+│ → 用户在 Telegram 收到回复                                │
+└──────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 3.7 ToolRegistry 与 ToolLoader
+## 3.4 模块间的协作关系
 
-源码：
+### 依赖关系图
 
-~~~text
-nanobot/agent/tools/registry.py
-nanobot/agent/tools/loader.py
-nanobot/agent/tools/base.py
-nanobot/agent/tools/schema.py
-~~~
+```
+┌─────────────────────────────────────────────────┐
+│              模块依赖关系                         │
+│                                                 │
+│  AgentLoop                                      │
+│  ├── 依赖 → MessageBus (消费/推送消息)           │
+│  ├── 依赖 → AgentRunner (委托执行)               │
+│  ├── 依赖 → MemoryStore (保存历史)               │
+│  └── 依赖 → ToolRegistry (注册工具)              │
+│                                                 │
+│  AgentRunner                                    │
+│  ├── 依赖 → Provider (调用 LLM)                  │
+│  ├── 依赖 → ToolRegistry (执行工具)              │
+│  ├── 依赖 → ContextBuilder (构建 prompt)         │
+│  └── 可选 → SubagentManager (创建子Agent)        │
+│                                                 │
+│  ContextBuilder                                 │
+│  ├── 依赖 → MemoryStore (读取记忆)               │
+│  ├── 依赖 → SkillLoader (加载技能)               │
+│  └── 依赖 → Config (读取配置)                    │
+│                                                 │
+│  ToolRegistry                                   │
+│  ├── 管理 → Built-in Tools (内置工具)            │
+│  └── 管理 → MCPToolWrapper (MCP 工具)            │
+│                                                 │
+│  ChannelManager                                 │
+│  ├── 管理 → 各 Channel 适配器                    │
+│  └── 依赖 → MessageBus (消息收发)                │
+│                                                 │
+└─────────────────────────────────────────────────┘
+```
 
-### ToolLoader
+### 创建顺序
 
-回答：
+Nanobot 启动时的组件创建顺序：
 
-> 哪些 Tool 应该被发现和构造？
-
-AgentLoop._register_default_tools 会先构造 ToolContext，其中包含：
-
-~~~text
-tools config
-workspace
-bus
-subagent manager
-cron service
-exec session manager
-sessions
-provider loader
-timezone
-workspace sandbox
-runtime control
-~~~
-
-然后：
-
-~~~python
-ToolLoader().load(ctx, self.tools)
-~~~
-
-### ToolRegistry
-
-回答：
-
-> 已经发现的 Tool 如何统一注册、暴露 schema、lookup 和 execute？
-
-可以类比你熟悉的 Spring：
-
-~~~text
-ToolLoader
-≈ 扫描/实例化 Bean 的阶段
-
-ToolRegistry
-≈ 一个面向模型的运行期 Registry
-~~~
-
-但不要机械等同，因为 Tool 还携带 model-facing schema 和 execution policy。
+```
+1. 解析配置文件 (nanobot.yml)
+2. 创建 MessageBus
+3. 创建 Provider (LLM 客户端)
+4. 创建 ToolRegistry
+5. 注册内置工具
+6. 连接 MCP Servers → 注册 MCP 工具
+7. 创建 MemoryStore
+8. 创建 ContextBuilder
+9. 创建 AgentLoop
+10. 创建 ChannelManager → 注册各 Channel
+11. 启动 AgentLoop (开始消费消息)
+12. 启动各 Channel (开始接收消息)
+```
 
 ---
 
-## 3.8 Session、Compaction 与 Memory
+## 3.5 关键设计模式
 
-### SessionManager
+Nanobot 在 4000 行代码中应用了多种经典设计模式。这是面试中展现软件工程素养的好素材。
 
-职责是：
+### 模式 1：异步消息总线 / 生产者-消费者模式
 
-> Manage session identity, caching, retention, and persistence.
+**应用场景**：MessageBus 的双队列设计
 
-Session 保存结构化对话和 metadata。
+```python
+# 生产者 (Channel)
+async def on_message(self, raw_msg):
+    inbound = InboundMessage(...)
+    await self.bus.inbound.put(inbound)   # 生产
 
-### AutoCompact
+# 消费者 (AgentLoop)
+async def run(self):
+    while True:
+        msg = await self.bus.inbound.get()  # 消费
+        await self._process(msg)
+```
 
-AutoCompact 会关注 idle session：
+**设计价值**：
+- 解耦了消息的生产（Channel）和消费（AgentLoop）
+- 支持多个生产者（多 Channel）同时工作
+- 天然支持异步和并发
+- 可以轻松增加消费者（水平扩展）
 
-~~~text
-idle?
-+ 存在未归档消息?
-+ 没有 active turn?
-→ schedule compact
-~~~
+### 模式 2：注册表模式（Registry Pattern）
 
-### Consolidator
+**应用场景**：Provider 注册和 ToolRegistry
 
-负责把旧 transcript 做 summarization/archive，并生成 summary checkpoint。
+```python
+# Provider 注册表
+PROVIDERS = {
+    "openai": OpenAIProvider,
+    "anthropic": AnthropicProvider,
+    "deepseek": DeepSeekProvider,
+    "ollama": OllamaProvider,
+    # ...
+}
 
-### Dream
+# 使用时通过名称查找
+provider_cls = PROVIDERS[config.provider.type]
+provider = provider_cls(config.provider)
 
-再把长期积累整理成 durable files：
+# 工具注册表
+class ToolRegistry:
+    def __init__(self):
+        self._tools = {}
+    
+    def register(self, name, tool):
+        self._tools[name] = tool
+    
+    def execute(self, name, args):
+        return self._tools[name].run(args)
+```
 
-~~~text
-SOUL.md
-USER.md
-memory/MEMORY.md
-~~~
+**设计价值**：
+- 新增 Provider 只需注册，无需修改现有代码（开闭原则）
+- 统一的查找和管理接口
+- 支持运行时动态注册
 
-所以三层一定要区分：
+### 模式 3：策略/适配器模式（Strategy/Adapter Pattern）
 
-~~~text
-Session Replay
-≠
-Compacted Archive
-≠
-Curated Long-term Memory
-~~~
+**应用场景**：Channel 适配器
+
+```python
+# 抽象接口
+class BaseChannel:
+    async def receive(self) -> InboundMessage: ...
+    async def send(self, msg: OutboundMessage): ...
+
+# 具体适配器
+class TelegramChannel(BaseChannel):
+    async def receive(self):
+        raw = await self.telegram_api.get_update()
+        return InboundMessage(text=raw.text, ...)
+    
+    async def send(self, msg):
+        await self.telegram_api.send_message(msg.text)
+
+class FeishuChannel(BaseChannel):
+    async def receive(self):
+        raw = await self.feishu_api.get_event()
+        return InboundMessage(text=raw.content, ...)
+    
+    async def send(self, msg):
+        await self.feishu_api.send_card(msg.text)
+```
+
+**设计价值**：
+- AgentLoop 只面向 BaseChannel 接口编程，不关心具体平台
+- 新增平台只需实现 BaseChannel 接口
+- 统一了不同平台的消息格式差异
+
+### 模式 4：包装器模式（Wrapper/Decorator Pattern）
+
+**应用场景**：MCPToolWrapper
+
+```python
+class MCPToolWrapper:
+    """将远程 MCP 工具包装为本地工具接口"""
+    
+    def __init__(self, server_name, tool_spec):
+        self.name = f"mcp_{server_name}_{tool_spec.name}"
+        self.description = tool_spec.description
+        self.schema = self._normalize_schema(tool_spec.input_schema)
+    
+    async def run(self, args):
+        # 将本地调用转换为 MCP 协议的远程调用
+        result = await self.mcp_client.call_tool(
+            self.original_name, args
+        )
+        return result
+    
+    def _normalize_schema(self, schema):
+        """将 MCP schema 转换为 OpenAI 兼容格式"""
+        # 处理 schema 差异
+        return normalized_schema
+```
+
+**设计价值**：
+- 外部 MCP 工具对 AgentRunner 来说和内置工具没有区别
+- 封装了 MCP 协议的通信细节
+- 处理了 schema 格式差异（MCP 格式 → OpenAI 格式）
+
+### 模式 5：配置驱动组装（Configuration-Driven Assembly）
+
+**应用场景**：nanobot.yml 驱动整个系统的构建
+
+```yaml
+# nanobot.yml
+name: "我的AI助手"
+provider:
+  type: deepseek
+  model: deepseek-chat
+channels:
+  - type: telegram
+    token: ${TELEGRAM_TOKEN}
+  - type: feishu
+    app_id: ${FEISHU_APP_ID}
+mcp_servers:
+  - name: filesystem
+    command: "npx @anthropic/mcp-server-filesystem /data"
+memory:
+  consolidation_threshold: 50
+```
+
+```python
+# 框架根据配置文件自动组装
+def build_from_config(config_path):
+    config = load_yaml(config_path)
+    bus = MessageBus()
+    provider = PROVIDERS[config.provider.type](config.provider)
+    tools = ToolRegistry()
+    for mcp in config.mcp_servers:
+        tools.register_mcp(mcp)
+    for ch in config.channels:
+        ChannelManager.add(CHANNELS[ch.type](ch, bus))
+    return AgentLoop(bus, provider, tools)
+```
+
+**设计价值**：
+- 用户无需写代码，通过配置文件定义 Agent
+- 系统组装逻辑与业务逻辑分离
+- 支持环境变量插值（`${VAR}`），安全管理密钥
+
+### 模式 6：Workspace 为中心
+
+**应用场景**：所有与项目相关的文件都在 workspace 目录中
+
+```
+workspace/
+├── nanobot.yml         # Agent 配置
+├── MEMORY.md           # 长期记忆
+├── HISTORY.md          # 交互历史
+├── .nanobot/
+│   └── skills/         # 技能文件
+│       ├── coding/SKILL.md
+│       └── writing/SKILL.md
+└── user_files/         # 用户的项目文件
+    ├── src/
+    └── docs/
+```
+
+**设计价值**：
+- 自然隔离不同项目的上下文和记忆
+- 所有配置和状态集中管理
+- 版本控制友好（可以 git 管理整个 workspace）
+- `restrict_to_workspace` 选项提供安全沙箱
+
+### 模式 7：渐进披露（Progressive Disclosure）
+
+**应用场景**：配置和功能的逐步展示
+
+```yaml
+# 最简配置（5 行）
+name: "助手"
+provider:
+  type: openai
+  model: gpt-4
+  api_key: ${OPENAI_API_KEY}
+
+# 进阶配置（按需添加）
+channels:
+  - type: telegram
+    token: ${TOKEN}
+mcp_servers:
+  - name: tools
+    command: "..."
+memory:
+  consolidation_threshold: 50
+cron:
+  - schedule: "0 9 * * *"
+    message: "早安！"
+```
+
+**设计价值**：
+- 新手 5 行配置即可启动
+- 高级用户可以逐步添加高级功能
+- 降低了入门门槛
+
+### 模式 8：虚拟工具（Virtual Tool）
+
+**应用场景**：save_memory 工具
+
+```python
+# save_memory 不是真正的外部工具
+# 当 LLM 决定调用 save_memory 时：
+if tool_call.name == "save_memory":
+    # 直接在框架内部处理，不走 ToolRegistry
+    memory_store.save(tool_call.args["content"])
+    return "Memory saved successfully"
+```
+
+**设计价值**：
+- 对 LLM 来说，save_memory 和其他工具没有区别
+- 减少了不必要的 I/O 和网络开销
+- 保持了工具调用接口的统一性
+
+### 模式 9：会话并发控制
+
+**应用场景**：AgentLoop 的会话锁和并发闸门
+
+```python
+class AgentLoop:
+    def __init__(self):
+        self._session_locks = {}          # 会话级别的锁
+        self._concurrency_gate = asyncio.Semaphore(3)  # 全局并发限制
+    
+    async def _process(self, msg):
+        session_id = msg.session_id
+        
+        # 1. 会话锁：同一会话串行
+        if session_id not in self._session_locks:
+            self._session_locks[session_id] = asyncio.Lock()
+        
+        async with self._session_locks[session_id]:
+            # 2. 并发闸门：全局最多 3 个并发
+            async with self._concurrency_gate:
+                await self._run_agent(msg)
+```
+
+**设计价值**：
+- 会话锁防止同一用户的消息并发处理（上下文一致性）
+- 并发闸门防止全局过载（API 限流保护）
+- 两层控制互不冲突，互补保护
+
+### 模式 10：Prompt Cache 优化
+
+**应用场景**：ContextBuilder 的 prompt 构建策略
+
+```python
+class ContextBuilder:
+    def build_messages(self, user_msg, history):
+        messages = []
+        
+        # System prompt 放在最前面，利用 LLM 的 prompt cache
+        # 这部分跨请求几乎不变，可以被缓存
+        system = self.build_system_prompt()  # Identity + Bootstrap + Memory + Skills
+        messages.append({"role": "system", "content": system})
+        
+        # 历史消息
+        for h in history:
+            messages.append(h)
+        
+        # 当前用户消息放在最后
+        messages.append({"role": "user", "content": user_msg})
+        
+        return messages
+```
+
+**设计价值**：
+- 将不变的部分（system prompt）放在前面，利用 LLM API 的 Prompt Cache 功能
+- 减少重复 Token 的计费
+- 降低延迟（缓存命中时不需要重新处理）
+- Claude、GPT-4 等都支持 Prompt Cache
 
 ---
 
-## 3.9 Workspace Scope
+## 3.6 架构对比
 
-current-source 区分：
+### Nanobot vs LangChain 架构对比
 
-~~~text
-configured agent workspace
-effective project workspace
-~~~
+| 维度 | Nanobot | LangChain |
+|------|---------|-----------|
+| **核心抽象** | MessageBus + AgentLoop | Chain + Agent + Memory + Tool |
+| **编排方式** | LLM 自主决策（隐式） | LangGraph 显式编排 / AgentExecutor |
+| **消息传递** | 双队列 MessageBus | Callback 机制 |
+| **工具注册** | ToolRegistry + MCPToolWrapper | BaseTool + Toolkit |
+| **配置方式** | YAML 文件 | Python 代码 |
+| **记忆实现** | MEMORY.md + HISTORY.md | ConversationBufferMemory / VectorStoreMemory 等 |
+| **抽象层级** | 2-3 层 | 5-7 层 |
+| **源码可读性** | 高（4K行，架构清晰） | 低（50万行+，抽象层多） |
 
-| 数据 | Owner |
-|---|---|
-| SOUL / USER / Memory | Agent Workspace |
-| custom skills | Agent Workspace |
-| project AGENTS.md | Project Workspace |
-| relative file path | Project Workspace |
-| shell cwd | Project Workspace |
-| session namespace | Agent Workspace identity |
+**关键差异**：
 
-这允许：
+```
+LangChain 的做法：
+  用户请求 → Prompt Template → Chain → Agent → Tool → Output Parser → Memory
+                ↑ 每一步都有抽象层
 
-> 同一个 Agent profile 在多个 project 中工作，而不是为每个项目复制一套完整 Agent。
+Nanobot 的做法：
+  用户消息 → MessageBus → AgentRunner(LLM + Tools 循环) → 响应
+                ↑ 最小必要抽象
+```
 
----
+### Nanobot vs CrewAI 架构对比
 
-## 3.10 并发模型
-
-### 3.10.1 Per-session FIFO
-
-current AgentLoop 使用：
-
-~~~text
-_pending_queues[session_key]
-~~~
-
-每个 session 创建一个 sole worker。
-
-新消息到达：
-
-~~~text
-该 session 已有 pending queue?
-├─ 是 → 加入队列
-└─ 否 → 新建 queue + worker
-~~~
-
-允许注入的 follow-up 可以在当前 turn 中被 Runner 消费；独立 turn 仍保持 FIFO barrier。
-
-### 3.10.2 Session Lock
-
-_session_locks 仍保护同一 session 的关键处理互斥。
-
-### 3.10.3 全局并发
-
-源码当前逻辑：
-
-~~~python
-_max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "0"))
-self._concurrency_gate = (
-    asyncio.Semaphore(_max) if _max > 0 else None
-)
-~~~
-
-含义：
-
-- 未设置 / 0 / negative：Unlimited；
-- positive：限制 running inbound requests。
-
-### 3.10.4 Subagent 并发
-
-另一套配置：
-
-~~~text
-agents.defaults.maxConcurrentSubagents
-~~~
-
-当前默认 4。
-
-所以：
-
-> inbound concurrency 与 subagent concurrency 是两套不同资源控制。
+| 维度 | Nanobot | CrewAI |
+|------|---------|--------|
+| **Agent 模型** | 单 Agent + SubAgent | 多 Agent 角色 |
+| **任务分配** | LLM 自主决定 | 用户预定义角色和任务 |
+| **协作方式** | SubAgent 后台并行 | Agent 间消息传递 |
+| **适用场景** | 个人助手 | 团队协作模拟 |
 
 ---
 
-## 3.11 Hooks、Events 与 Delivery
+## 3.7 面试高频题
 
-current-source 还把 execution side effect 拆出来。
+### Q1: 请描述 Nanobot 的架构设计
 
-### Hook
+> **标准回答**：
+> 
+> "Nanobot 采用五层架构设计。最上层是 UI 层，支持 Telegram、飞书、钉钉等 8+ 聊天平台；第四层是 Gateway 层，核心是 MessageBus 双队列（Inbound/Outbound），负责统一消息收发；第三层是核心的 Agent 层，包括 AgentLoop（消息消费和会话管理）、AgentRunner（ReAct 循环）、ContextBuilder（prompt 构建）、MemoryStore（记忆管理）等；第二层是 Provider 层，封装了 11+ LLM 供应商的调用；最底层是 Tool 层，包括内置工具和 MCP 工具。
+> 
+> 这个架构的核心设计思想是：通过 MessageBus 解耦消息收发，通过 AgentRunner 实现 ReAct 循环，通过 Provider 抽象层支持多种 LLM，通过 MCPToolWrapper 统一工具调用。整体只有 4000 行代码，但层次清晰、关注点分离，是非常优雅的架构设计。"
 
-Runner 生命周期钩子，例如：
+### Q2: Nanobot 用了哪些设计模式？
 
-~~~text
-before_run
-after_run
-on_error
-on_finally
-~~~
+> **标准回答**：
+> 
+> "Nanobot 虽然代码精简，但运用了多种经典设计模式。主要包括：
+> 
+> 1. **生产者-消费者模式**：MessageBus 的双队列设计，Channel 是生产者，AgentLoop 是消费者；
+> 2. **注册表模式**：Provider 注册表和 ToolRegistry，支持运行时动态注册；
+> 3. **适配器模式**：Channel 适配器统一了不同平台的消息格式；
+> 4. **包装器模式**：MCPToolWrapper 将远程 MCP 工具包装为本地工具接口；
+> 5. **配置驱动组装**：通过 YAML 文件驱动系统构建；
+> 6. **虚拟工具模式**：save_memory 不是真正的外部工具，而是框架内部拦截处理。
+> 
+> 这些模式的共同特点是降低耦合、提高扩展性。例如新增一个 LLM 供应商只需在 PROVIDERS 注册表中添加一项，不需要修改任何现有代码。"
 
-### EventSink
+### Q3: MessageBus 为什么用双队列而不是单队列？
 
-用于发布 runtime/output event。
+> **标准回答**：
+> 
+> "双队列设计（Inbound + Outbound）实现了消息收发的完全解耦。Channel 只需要向 Inbound Queue 推送消息、从 Outbound Queue 消费消息，不需要直接和 AgentLoop 交互。这有几个好处：
+> 
+> 1. Channel 发送消息后不需要等待 Agent 处理完毕（异步非阻塞）；
+> 2. 多个 Channel 可以同时向 Inbound Queue 推送消息，不会互相阻塞；
+> 3. Agent 的处理速度和 Channel 的消息速度可以独立变化；
+> 4. 未来可以轻松增加多个 AgentLoop 消费者来水平扩展。
+> 
+> 如果用单队列，Channel 需要等待 Agent 处理完毕才能收到响应，这会阻塞 Channel 接收新消息，降低整体吞吐量。"
 
-### TurnDelivery
+### Q4: 会话锁和并发闸门的区别是什么？
 
-负责：
-
-- route；
-- stream lifecycle；
-- complete/fail；
-- outbound publication。
-
-这样 Runner 不需要知道 Feishu/Telegram 的发送细节。
-
----
-
-## 3.12 关键设计模式
-
-### Adapter
-
-Channel 将平台协议转换为统一消息事件。
-
-### Registry
-
-Provider、Tool 都通过 registry/discovery 管理。
-
-### Composition Root
-
-MCPProvider、ToolRegistry 在应用启动层组装，而不是 runtime core 任意创建。
-
-### Pipeline
-
-Turn 明确拆成 restore/compact/command/build/run/save/respond。
-
-### Context Object
-
-TurnContext 集中保存一次 turn 的共享可变状态。
-
-### Event-driven
-
-MessageBus、runtime events、delivery 让 UI/channel/core 解耦。
+> **标准回答**：
+> 
+> "两者解决的是不同层面的并发问题。
+> 
+> 会话锁（`_session_locks`）是细粒度的，按 session_id 分别加锁。它确保同一个用户的消息按顺序串行处理，不会出现两条消息同时处理导致上下文混乱的问题。不同用户之间互不影响。
+> 
+> 并发闸门（`_concurrency_gate`）是粗粒度的，是一个全局信号量（默认值 3）。它限制了同一时刻最多只有 3 个会话在并行处理，防止过多并发请求打垮 LLM API 或占用过多资源。
+> 
+> 两者是互补关系：会话锁保证数据一致性，并发闸门保证系统稳定性。"
 
 ---
 
-## 3.13 如何定位 Bug
+## 3.8 本章总结
 
-| 症状 | 第一入口 |
-|---|---|
-| WebUI 发消息没进 Agent | Channel / MessageBus |
-| 同 Session 顺序乱 | pending queue / session worker |
-| model 选错 | ModelRuntimeResolver |
-| memory 没进 prompt | ContextBuilder |
-| tool 没显示给模型 | ToolLoader / ToolRegistry |
-| tool call 执行错 | Tool implementation |
-| answer 没保存 | persist stage / SessionManager |
-| stream 卡住 | Runner + TurnDelivery + Channel |
-| MCP Tool 消失 | MCPProvider / Registry |
-| 定时任务没触发 | CronService / automation coordinator |
-
----
-
-## 3.14 面试高频题
-
-### Q1：为什么 AgentLoop 和 AgentRunner 要拆？
-
-因为它们的变化原因不同：
-
-- Loop 随 channel/session/workspace/产品需求变化；
-- Runner 随 provider/tool/streaming/model execution 变化。
-
-拆开后，Runner 更容易被 Subagent 等场景复用，也更容易单测。
-
-### Q2：为什么同 Session 要 FIFO？
-
-否则可能出现：
-
-- history 顺序错；
-- tool result 归属错；
-- provider state 覆盖；
-- output 顺序错。
-
-### Q3：默认 Unlimited 是否等于无限吞吐？
-
-不是。
-
-实际吞吐仍受：
-
-- provider rate limit；
-- CPU/内存；
-- network；
-- tools；
-- channels；
-- subagent。
-
-生产环境要根据资源设置合理 cap。
+```
+┌─────────────────────────────────────────────────────┐
+│                   本章核心要点                        │
+│                                                     │
+│  五层架构                                            │
+│  ├── UI 层 → Channel 适配器                          │
+│  ├── Gateway 层 → MessageBus 双队列                  │
+│  ├── Core Agent 层 → AgentLoop + AgentRunner         │
+│  ├── Provider 层 → LLM 供应商抽象                    │
+│  └── Tool 层 → ToolRegistry + MCPToolWrapper         │
+│                                                     │
+│  四大核心模块                                        │
+│  ├── AgentLoop → 消息消费 + 会话管理                  │
+│  ├── AgentRunner → ReAct 循环执行                    │
+│  ├── MemoryStore → 双层记忆管理                      │
+│  └── MessageBus → 异步消息传递                       │
+│                                                     │
+│  10 个设计模式                                       │
+│  ├── 生产者-消费者、注册表、适配器                     │
+│  ├── 包装器、配置驱动、Workspace中心                  │
+│  ├── 渐进披露、虚拟工具                              │
+│  └── 会话并发控制、Prompt Cache                      │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 3.15 本章总结
+## 下一章
 
-现在你应该能回答：
+理解了架构设计之后，接下来我们将深入源码，逐文件、逐函数地解读 Nanobot 的核心实现。
 
-~~~text
-谁负责一个用户 Turn？
-→ AgentLoop
+➡️ [04 - 源码逐行解读](../04-source-code-walkthrough/README.md)
 
-谁负责模型和工具循环？
-→ AgentRunner
+---
 
-谁负责模型这次看到什么？
-→ ContextBuilder
-
-谁负责工具发现和执行？
-→ ToolLoader + ToolRegistry
-
-谁负责对话长期存在？
-→ SessionManager + Memory/Compaction/Dream
-~~~
-
-下一章不再只看架构图，而是沿着**一条真实消息**把源码走到底。
+> 📝 **本章小结**：Nanobot 的架构设计是"极简但不简单"。五层架构清晰分离了关注点，四大核心模块各司其职，10 个经典设计模式保证了代码的扩展性和可维护性。理解这些架构设计，你就掌握了面试中最有深度的技术素材。
