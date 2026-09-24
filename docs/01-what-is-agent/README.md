@@ -1,5 +1,7 @@
 # 01 - 什么是 AI Agent
 
+> **2026 current-source 说明**：本章直接沿用原版 learn-nanobot 的章节结构与主体内容；凡涉及 Nanobot 具体源码、配置、路径、记忆、并发、MCP 生命周期等实现细节，均按 HKUDS/nanobot main @ 2026-09-24 (source trace snapshot around 62aa6ba6a33790a656b952ef150517bd70d6eb30) 修订。
+
 > 🎯 **本章目标**：理解 AI Agent 的核心概念、与 LLM 的本质区别、核心三要素、ReAct 框架，以及主流 Agent 框架对比。这是面试中最基础也最重要的一章。
 
 ---
@@ -239,61 +241,35 @@ Agent 能对自己的行动结果进行评估和反思：
 检查结果是否满意
 ```
 
+
 ### 1.3.2 Memory（记忆）
 
-**定义**：Agent 保存并利用历史信息、用户偏好、任务状态和长期知识的能力。
+Memory 仍然是 Agent 的核心要素，但 **Nanobot current-source 已经不再是旧版“Session + memory/history.jsonl + Dream-managed durable memory 双文件”模型**。为了后续读源码，先把状态分成四层：
 
-#### 记忆的常见层次
-
-```
-短期上下文（Current Context）
-├── 当前一次模型调用真正看到的 messages
-├── System Prompt / Runtime Context
-└── 当前用户输入与必要历史
-
-会话状态（Session）
-├── 当前 conversation 的结构化消息
-├── metadata / provider state / checkpoint
-└── 用于恢复多轮任务
-
-压缩历史（Consolidated History）
-├── 将较旧会话压缩为长期历史来源
-└── 避免每轮都携带全部原始 transcript
-
-长期记忆（Durable Memory）
-├── 稳定的用户信息
-├── 项目事实 / 长期偏好
-└── 由后续 ContextBuilder 选择性注入
-```
-
-#### Nanobot 2026-09-24 current-source 的记忆系统
-
-旧版教程常把 Nanobot 简化为 `MEMORY.md + HISTORY.md` 双文件系统；这已经不符合 current-source。当前主路径是：
-
-```
-Session JSONL
-   ↓
-AutoCompact / Consolidator
-   ↓
-memory/history.jsonl
-   ↓
+~~~text
+当前 Model Context
+        ↑
+Session JSONL / provider state / summary
+        ↑
+Consolidation → memory/history.jsonl
+        ↓
 Dream
-   ↓
+        ↓
 SOUL.md / USER.md / memory/MEMORY.md
-   ↓
-ContextBuilder 在后续 Turn 中重新注入
-```
+~~~
 
-关键源码：
+| 层级 | 主要作用 | current-source 对应 |
+|---|---|---|
+| 当前上下文 | 这一次模型真正看到的消息 | ContextBuilder / TranscriptInput |
+| Session | 当前会话的结构化 replay、metadata、provider state | session/manager.py |
+| 历史归档 | 压缩后的长期历史来源 | memory/history.jsonl |
+| Durable Memory | 跨 Session 保留的稳定事实、用户偏好、Agent identity | SOUL.md / USER.md / memory/MEMORY.md |
 
-- `nanobot/session/manager.py`：Session identity、cache、retention、persistence
-- `nanobot/agent/autocompact.py`：idle Session 的自动压缩
-- `nanobot/agent/memory.py`：MemoryStore、Consolidator、Dream 相关持久化
-- `nanobot/agent/context.py`：决定当前模型调用实际看到哪些长期信息
+这里最重要的区别是：
 
-`HISTORY.md` 在 current-source 中主要是 legacy migration 输入，新的长期历史使用 `memory/history.jsonl`。current-source 也不再以旧版 `save_memory` 虚拟工具作为长期记忆主路径。
+> **Session 是“系统保存了什么”，Context 是“本轮给模型看什么”，Dream-managed durable memory 是“跨更长周期值得保留什么”。**
 
-这种设计仍保留 Nanobot 的透明性：长期记忆是 Workspace 中可审计的文件，但同时把“当前 Context”“Session Replay”“历史归档”“长期记忆”明确分层。
+current MemoryStore 仍管理 `MEMORY.md`，但旧 `memory/history.jsonl` 主要作为 legacy migration 输入；current 主路径是 `history.jsonl`。
 
 ### 1.3.3 Tool Use（工具使用）
 
@@ -422,34 +398,42 @@ Final Answer: "Apple (AAPL) 当前股价 $245.32。
 期间最高触及 $248.90，最低回落至 $225.10。整体呈上涨趋势。"
 ```
 
+
 ### ReAct 在 Nanobot 中的体现
 
-2026-09-24 current-source 将“一个用户 Turn”和“模型/工具迭代”拆成两层：
+current-source 不再把所有逻辑都塞进一个 AgentLoop。最关键的边界是：
 
-```
+~~~text
 AgentLoop
-├── 面向 Channel / Session / Workspace
-├── restore → compact → command → build → run → save → respond
-└── 构造 AgentRunSpec
+  └─ 负责一个 channel-facing turn：Session / Workspace / Context / Delivery
 
 AgentRunner
-├── 面向 Provider / Tool execution
-├── 调用模型
-├── 解析 Tool Call
-├── 通过 ToolRegistry 执行工具
-├── Tool Result 回填 messages
-└── 继续下一轮，直到 final answer / limit / error
-```
+  └─ 负责 model-facing loop：Provider ↔ ToolRegistry ↔ Provider
+~~~
 
-因此今天理解 Nanobot 的 ReAct，不应该再把所有逻辑都归到一个 `AgentLoop`。真正的 model-facing provider/tool loop 在 `nanobot/agent/runner.py`，而 `nanobot/agent/loop.py` 负责一次用户 Turn 的产品层编排。
+可以把 `AgentRunner` 的核心逻辑理解成：
 
-另外，现代模型/API 未必把完整 Thought 暴露给应用。工程上判断是否形成 ReAct 闭环，更应该看：
+~~~python
+for iteration in range(max_iterations):
+    response = await provider(...)
+    if response.tool_calls:
+        results = await execute_tools(...)
+        messages.extend(results)
+        continue
+    return final_answer
+~~~
 
-```
-Model → Tool Call → Tool Execution → Tool Result → Model
-```
+真实 current-source 还会处理 streaming、provider conversation state、tool result governance、checkpoint、context compaction、mid-turn injection、cancellation 等。
 
-而不是看日志里是否打印了 Thought。
+因此 ReAct 在工程上的关键不是“是否打印 Thought”，而是：
+
+~~~text
+Model Decision
+→ Tool Call
+→ Tool Execution
+→ Observation / Tool Result
+→ 下一轮 Model Decision
+~~~
 
 ### ReAct vs 其他范式对比
 
@@ -527,50 +511,40 @@ Model → Tool Call → Tool Execution → Tool Result → Model
 └─────────────────────────────────────────────────────────────┘
 ```
 
+
 ### 在 Nanobot 中的具体实现
 
-current-source 一条典型消息链路：
+按 current-source，一条典型消息链路是：
 
-```
-Channel / CLI / WebUI
+~~~text
+Channel / WebUI / CLI
         ↓
 InboundMessage
         ↓
 MessageBus
         ↓
 AgentLoop
+  restore → compact → command → build → run → save → respond
         ↓
-Session restore + ContextBuilder
-        ↓
-AgentRunSpec
+ContextBuilder + SessionManager
         ↓
 AgentRunner
-        ↓
-Provider ↔ ToolRegistry
+        ↔ Provider
+        ↔ ToolRegistry
         ↓
 AgentRunResult
         ↓
-Session persistence
-        ↓
-TurnDelivery / OutboundMessage
+Session persistence + OutboundMessage
         ↓
 Channel
-```
+~~~
 
-核心文件：
-
-| 责任 | current-source |
-|---|---|
-| 消息事件 | `nanobot/bus/events.py` |
-| 消息总线 | `nanobot/bus/queue.py` |
-| Turn 编排 | `nanobot/agent/loop.py` |
-| Provider/Tool Loop | `nanobot/agent/runner.py` |
-| Context | `nanobot/agent/context.py` |
-| Tool Registry | `nanobot/agent/tools/registry.py` |
-| Session | `nanobot/session/manager.py` |
-| Memory / Dream | `nanobot/agent/memory.py` |
-
-这条链比背“某个类就是整个 Agent”更重要。
+其中：
+- `AgentLoop` 负责用户 Turn 的产品层编排；
+- `AgentRunner` 负责模型与工具循环；
+- `ContextBuilder` 负责把 AGENTS/SOUL/USER、Memory、Skills、Project instruction、Session history 等组合为本轮上下文；
+- `ToolRegistry` 统一管理 native tool、MCP tool 等 model-callable capability；
+- `SessionManager` 负责 conversation identity、cache、retention 和 persistence。
 
 ## 1.6 主流 Agent 框架对比
 
@@ -595,7 +569,7 @@ Channel
 #### Nanobot（本项目重点）
 
 **优势**：
-- 核心运行时边界清晰，适合沿调用链深入阅读 current-source
+- 代码极简（~早期约 4000 行、current-source 已显著扩展），一个周末就能读完全部源码
 - 架构清晰，非常适合学习 Agent 设计思想
 - MCP 原生支持，紧跟技术趋势
 - 多平台支持（微信、飞书、钉钉、Telegram 等），接地气
@@ -642,7 +616,7 @@ Channel
 
 ### 面试推荐说法
 
-> "我学习过多个 Agent 框架，重点研究了 Nanobot。选择 Nanobot 的原因有三：第一，它的核心运行时边界清晰，可以沿 MessageBus → AgentLoop → AgentRunner → ToolRegistry → Session 深入理解 Agent 的设计思想；第二，它虽然轻量但五脏俱全——记忆系统、MCP 协议、多平台支持、子 Agent 机制一应俱全；第三，它是 2026 年的新项目，代表了 Agent 框架设计的最新趋势。"
+> "我学习过多个 Agent 框架，重点研究了 Nanobot。选择 Nanobot 的原因有三：第一，它只有 早期约 4000 行、current-source 已显著扩展 Python 代码，便于深入理解 Agent 的核心设计思想，而不是被框架的复杂抽象所困扰；第二，它虽然轻量但五脏俱全——记忆系统、MCP 协议、多平台支持、子 Agent 机制一应俱全；第三，它是 2026 年的新项目，代表了 Agent 框架设计的最新趋势。"
 
 ---
 
@@ -683,7 +657,7 @@ Channel
 2026
 ├── 01月  Agent 成为 AI 应用主流范式
 ├── 02月  HKUDS/nanobot 发布 ← 我们学习的项目
-│         → 超轻量级 Agent 框架，迅速获得 37K+ Stars
+│         → 超轻量级 Agent 框架，迅速获得 GitHub 社区持续活跃
 ├── 03月  MCP 生态全面成熟
 │         → 各类 MCP Server 生态丰富
 └── 04月  你正在学习本指南！
@@ -721,7 +695,7 @@ Channel
 
 ### 话术三：解释你选择学习 Nanobot 的原因
 
-> "我选择深入学习 Nanobot 框架，主要有三个原因。第一是'以小见大'，Nanobot current-source 已经发展成包含 MessageBus、AgentLoop、AgentRunner、Session/Memory、MCP、WebUI/Gateway、多平台适配与 Automations 的完整运行时，非常适合深入理解 Agent 的设计思想。第二是技术前沿性，它原生支持 MCP 协议，这是 2024 年 Anthropic 提出的工具调用标准化协议，代表了 Agent 技术的最新方向。第三是实用性，它支持微信、飞书、钉钉等国内平台，我可以直接用它搭建实际可用的 AI 助手。"
+> "我选择深入学习 Nanobot 框架，主要有三个原因。第一是'以小见大'，Nanobot 只有 早期约 4000 行、current-source 已显著扩展 Python 代码，但它的架构设计涵盖了消息总线、AgentLoop、记忆系统、MCP 协议支持、多平台适配等所有核心模块，非常适合深入理解 Agent 的设计思想。第二是技术前沿性，它原生支持 MCP 协议，这是 2024 年 Anthropic 提出的工具调用标准化协议，代表了 Agent 技术的最新方向。第三是实用性，它支持微信、飞书、钉钉等国内平台，我可以直接用它搭建实际可用的 AI 助手。"
 
 ---
 
@@ -793,7 +767,7 @@ AI Agent 的核心三要素是 ______、______ 和 ______。
 请对比 Nanobot 和 LangChain 的设计哲学差异。提示：从代码量、架构风格、目标用户三个维度分析。
 
 > 思路：
-> - Nanobot：核心边界清晰、Workspace/Project Scope 分层、支持 CLI/WebUI/Gateway/API/SDK
+> - Nanobot：极简（早期约 4000 行、current-source 已显著扩展）、Workspace 为中心、个人开发者
 > - LangChain：全面（50万行+）、抽象层丰富、企业开发者
 > - 核心差异：Nanobot 追求"够用就好"，LangChain 追求"无所不能"
 
@@ -804,7 +778,7 @@ AI Agent 的核心三要素是 ______、______ 和 ______。
 - 如何处理记忆容量限制？
 - 如何在后续对话中检索相关记忆？
 
-> 思路提示：可以参考 Nanobot 的方案（Session + Consolidation + Dream + MEMORY.md），也可以设计向量数据库方案。关键是要考虑"存什么"、"怎么存"、"怎么取"三个问题。
+> 思路提示：可以参考 Nanobot 的方案（Dream / MemoryStore 长期记忆链路 + MEMORY.md），也可以设计向量数据库方案。关键是要考虑"存什么"、"怎么存"、"怎么取"三个问题。
 
 **6. 场景题**
 
@@ -816,7 +790,7 @@ AI Agent 的核心三要素是 ______、______ 和 ______。
 
 **7.** 你认为 AI Agent 目前面临的最大挑战是什么？（可靠性？安全性？成本？）
 
-**8.** 为什么 Nanobot current-source 为什么仍能保持较清晰的核心边界，同时支持 WebUI、Gateway、MCP、Dream、Subagent 与多平台？这说明了哪些模块化设计原则？
+**8.** 为什么 Nanobot 能用 早期约 4000 行、current-source 已显著扩展代码实现其他框架数万行甚至数十万行才能实现的功能？这说明了什么设计原则？
 
 **9.** 如果 Agent 在执行任务的过程中做出了错误的决策（比如调用了错误的工具），Agent 系统应该如何处理？
 
