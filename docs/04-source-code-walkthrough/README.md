@@ -1,5 +1,7 @@
 # 04 - 源码逐行解读
 
+> **2026 current-source 说明**：本章直接沿用原版 learn-nanobot 的章节结构与主体内容；凡涉及 Nanobot 具体源码、配置、路径、记忆、并发、MCP 生命周期等实现细节，均按 HKUDS/nanobot main @ 2026-09-24 (source trace snapshot around 62aa6ba6a33790a656b952ef150517bd70d6eb30) 修订。
+
 > 🎯 **本章目标**：逐文件、逐函数地解读 Nanobot 的核心源码。看完本章，你将能在面试中自信地说"我读过全部源码"。
 
 ---
@@ -22,85 +24,61 @@
 
 ---
 
+
 ## 4.1 源码目录结构总览
 
-```
+current-source 已显著扩展。第一次走读不要试图完整展开全部目录，只抓主链：
+
+~~~text
 nanobot/
-├── __init__.py
-├── __main__.py                 # 入口点 → 启动 CLI
-├── cli.py                      # 命令行接口
-│
-├── agent/                      # 核心 Agent 模块
-│   ├── __init__.py
-│   ├── loop.py                 # ★ AgentLoop - 消息消费和会话管理
-│   ├── runner.py               # ★ AgentRunner - ReAct 循环执行器
-│   ├── context.py              # ★ ContextBuilder - Prompt 构建
-│   ├── memory.py               # ★ MemoryStore - 记忆系统
-│   ├── subagent.py             # SubagentManager - 子 Agent 管理
-│   └── tools/                  # 工具子模块
-│       ├── __init__.py
-│       ├── registry.py         # ★ ToolRegistry - 工具注册表
-│       ├── mcp.py              # ★ MCPToolWrapper - MCP 工具包装器
-│       ├── message.py          # MessageTool - 消息回复工具
-│       └── spawn.py            # SpawnTool - 子 Agent 生成工具
-│
-├── bus/                        # 消息总线
-│   ├── __init__.py
-│   └── message_bus.py          # ★ MessageBus - 双队列消息总线
-│
-├── channels/                   # 通道适配器
-│   ├── __init__.py
-│   ├── base.py                 # BaseChannel - 通道基类
-│   ├── telegram.py             # Telegram 适配器
-│   ├── discord.py              # Discord 适配器
-│   ├── feishu.py               # 飞书适配器
-│   ├── dingtalk.py             # 钉钉适配器
-│   ├── wechat.py               # 微信适配器
-│   ├── qq.py                   # QQ 适配器
-│   ├── slack.py                # Slack 适配器
-│   └── web.py                  # Web 适配器
-│
-├── providers/                  # LLM 供应商
-│   ├── __init__.py
-│   ├── base.py                 # BaseProvider - 供应商基类
-│   ├── openai.py               # OpenAI 适配
-│   ├── anthropic.py            # Anthropic/Claude 适配
-│   ├── deepseek.py             # DeepSeek 适配
-│   ├── dashscope.py            # 通义千问适配
-│   ├── ollama.py               # Ollama 本地模型
-│   ├── groq.py                 # Groq 适配
-│   └── registry.py             # PROVIDERS 注册表
-│
-├── config/                     # 配置管理
-│   ├── __init__.py
-│   ├── schema.py               # 配置数据类定义
-│   └── loader.py               # YAML 配置加载
-│
-└── utils/                      # 工具函数
-    ├── __init__.py
-    ├── logging.py              # 日志
-    └── helpers.py              # 通用辅助函数
-```
+├── bus/
+│   ├── events.py
+│   └── queue.py
+├── agent/
+│   ├── loop.py
+│   ├── runner.py
+│   ├── context.py
+│   ├── memory.py
+│   ├── autocompact.py
+│   ├── subagent.py
+│   ├── skills.py
+│   ├── plugins.py
+│   └── tools/
+│       ├── base.py
+│       ├── schema.py
+│       ├── registry.py
+│       ├── loader.py
+│       ├── filesystem.py
+│       ├── shell.py
+│       ├── web.py
+│       └── mcp.py
+├── session/
+│   └── manager.py
+├── channels/
+│   ├── base.py
+│   └── manager.py
+├── cron/
+└── security/
+~~~
 
-> 标注 ★ 的文件是核心文件，面试必须掌握。
+推荐同时打开 `tests/agent/`、`tests/tools/`、`tests/session/`。Test 往往比注释更精确地描述 current contract。
 
----
 
 ## 4.2 AgentLoop - loop.py
 
 ### 文件定位
 
-```
+~~~text
 nanobot/agent/loop.py
-```
+~~~
 
-### current-source 定位
+### 核心类：AgentLoop
 
-AgentLoop 是 **channel/session-facing Turn orchestration**，而不是把整个 ReAct 都包在一个类里。
+current AgentLoop 的类注释仍把自己称为 core processing engine，但它现在主要负责 **channel-facing turn orchestration**，而不是把整个 ReAct loop 都写在这里。
 
 构造阶段会协调：
 
-```
+~~~text
 ContextBuilder
 SessionManager
 ToolRegistry
@@ -108,26 +86,39 @@ AgentRunner
 Consolidator
 SubagentManager
 AutoCompact
-CommandRouter
 WorkspaceScopeResolver
-TurnDeliveryFactory
-```
+CommandRouter
+TurnDelivery
+~~~
 
-### run()：Session Admission
+### 构造函数参数详解
 
-`run()` 从 `MessageBus.consume_inbound()` 取消息，计算 effective session key，然后通过：
+现在参数已经远多于旧版，建议按责任分类，而不是死背签名：
 
-```
-_enqueue_session_message()
-→ _run_session_queue()
-→ _dispatch_one()
-```
+| 分类 | 例子 |
+|---|---|
+| Model Runtime | provider、model、model presets、context window |
+| Limits | max iterations、tool result limit、subagent concurrency |
+| State | workspace、SessionManager |
+| Tools | ToolsConfig、caller-owned ToolRegistry |
+| Product | channels config、unified session、timezone |
+| Hooks | hook/hook factory |
+| Automations | CronService、local trigger store |
 
-形成 per-session FIFO。
+### run() 方法：核心消费循环
 
-### _process_message()：七阶段 Pipeline
+current `run()`：
+1. 从 MessageBus 消费 `InboundMessage`；
+2. 计算 effective session key；
+3. priority command 可 inline dispatch；
+4. 若该 Session 已有 active pending queue，新消息进入同一个 inbox；
+5. 否则创建 per-session queue + sole worker；
+6. worker 在 `_dispatch_one()` 内做 lock / optional global gate；
+7. 最终进入 `_process_message()`。
 
-```
+### _process_message()：七阶段
+
+~~~text
 restore
 → compact
 → command
@@ -135,390 +126,449 @@ restore
 → run
 → save
 → respond
-```
+~~~
 
-每个阶段通过 `_run_turn_stage()` 记录 duration/outcome。
+每个阶段通过 `_run_turn_stage()` 统一记录 duration/outcome。
 
-### _register_default_tools()
+### _register_default_tools() 方法
 
-current-source 不是硬编码一个个 Tool，而是：
+current 不是一个个在 Loop 里手写 Tool。它构造 `ToolContext` 后调用：
 
-```
-ToolContext(...)
-→ ToolLoader().load(ctx, registry)
-```
+~~~text
+ToolLoader().load(ctx, self.tools)
+~~~
 
-MCP Tool 的连接生命周期不在这里；MCPProvider 由应用组合层拥有，并向共享 ToolRegistry 动态注册。
+MCP connection 本身不在这里；MCPProvider 由 application composition root 管理，并与 Loop 共享 ToolRegistry。
+
+### _save_turn / persist 语义
+
+current persistence 需要考虑：
+- history 不能重复 append；
+- provider state；
+- runtime checkpoint；
+- hidden/internal metadata；
+- early persisted user message；
+- automation/subagent marker。
+
+因此不能再把它简单描述为“把 USER/ASSISTANT 追加到 memory/history.jsonl”。
 
 ### 面试要点
 
-- AgentLoop = 一个用户 Turn 的编排层
-- per-session pending queue 保证 FIFO
-- TurnContext 是跨阶段共享状态对象
-- global concurrency cap 来自 `NANOBOT_MAX_CONCURRENT_REQUESTS`，未设置默认不加 cap
+> “我把 AgentLoop 理解为 Turn Orchestrator：它负责 session admission、restore/build/run/save/respond；真正的 model/tool loop 在 AgentRunner。current 同 Session 由 pending queue + sole worker 保持 FIFO，全局并发 gate 是可选配置。”
+
 
 ## 4.3 AgentRunner - runner.py
 
 ### 文件定位
 
-```
+~~~text
 nanobot/agent/runner.py
-```
+~~~
 
 ### 核心类：AgentRunner
 
-类注释强调它负责：
+current 类的定位：
 
-> tool-capable LLM loop without product-layer concerns
+> Run a tool-capable LLM loop without product-layer concerns.
 
-也就是不处理 Channel UI / Session 页面，只处理一次 model execution。
+也就是不负责 Channel、WebUI、Session 页面，而专注模型执行。
 
-### AgentRunSpec
+### run() 方法：ReAct 循环核心
 
-current Runner 通过 `AgentRunSpec` 接收：
+入口数据不再只是 messages，而是 `AgentRunSpec`：
 
-- transcript_input / transcript_builder
-- tools
-- runtime
-- max_iterations
-- max_tool_result_chars
-- hooks/events
-- checkpoint callback
-- consolidation callbacks
-- follow-up injection callback
-- provider conversation state
+~~~text
+runtime
+tools
+transcript_input
+transcript_builder
+max_iterations
+max_tool_result_chars
+hooks
+checkpoint callback
+compaction callbacks
+injection callbacks
+provider state
+workspace/session key
+~~~
 
-### run()
+概念循环：
 
-```
-initial transcript / compaction state
-→ hook.before_run
-→ _run_core
-→ AgentRunResult
-→ after_run / on_error / on_finally
-```
-
-### Tool Loop
-
-```
+~~~text
 Provider
-  ↓
-Assistant Response
-  ├─ final → stop
-  └─ tool calls
-       ↓
-    ToolRegistry
-       ↓
-    Tool Results
-       ↓
-    append messages
-       ↓
-    Provider again
-```
+→ Assistant
+→ 有 Tool Call?
+   ├─ 否 → Final
+   └─ 是 → ToolRegistry.execute
+           → append Tool Results
+           → Provider again
+~~~
 
-current Loop 创建 spec 时可启用 `concurrent_tools=True`，因此一轮多个独立 Tool Call 可以并发执行。
+current 还处理：
+- streaming delta/reasoning；
+- concurrent tools；
+- tool result spill/truncation；
+- provider retry；
+- conversation state；
+- checkpoint；
+- context compaction；
+- mid-turn input injection；
+- max-iteration finalization；
+- cancellation。
 
-### 与旧版的差异
+### Tool 执行
 
-- 不再在 Runner 里拦截旧版 `save_memory` 虚拟工具作为长期记忆主路径。
-- Tool Result 大小通过可配置的 `max_tool_result_chars` 治理，current default 可在 `AgentDefaults` / Settings 中查看，不应把实现写死成“永远 16000 常量”。
-- 支持 Provider Conversation State、checkpoint、injection、streaming、compaction。
+不再存在旧版“AgentRunner 特判 Dream / MemoryStore 虚拟工具”这条主路径。普通 native/MCP tools 统一进入 Tool Registry/Execution；长期记忆更新由 Consolidator/Dream 体系负责。
+
+### Lifecycle Hooks 详解
+
+`run()` 会围绕 core execution 调用：
+- before_run；
+- after_run；
+- on_error；
+- on_finally。
+
+Hook 使 observability、streaming/output side effect 与核心 loop 分离。
+
+### 关键设计决策
+
+最大的设计点是：**把 product-layer concern 留在 AgentLoop，把 model execution 做成可复用 Runner。** SubagentManager 也因此可以复用 AgentRunner。
+
 
 ## 4.4 ContextBuilder - context.py
 
 ### 文件定位
 
-```
+~~~text
 nanobot/agent/context.py
-```
+~~~
 
-### BOOTSTRAP_FILES
+### 核心类：ContextBuilder
 
-current-source：
+current 定义：
 
-```python
+~~~python
 BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md"]
-```
+~~~
 
-### build_system_prompt()
+ContextBuilder 还持有 `MemoryStore` 与 `SkillsLoader`。
 
-System Context 不是单一模板，而会组合：
+### build_system_prompt() 方法
 
-- Runtime/Tool Contract
-- Agent Workspace 的身份文件
-- Effective Project 的 AGENTS.md
-- Long-term Memory
-- Always-active Skills
-- Skills Summary
-- Session Summary
-- Runtime Context
+System Prompt 不是单一静态模板，概念上会组合：
+- stable runtime/tool contract；
+- Agent identity；
+- AGENTS/SOUL/USER；
+- Project instruction；
+- long-term memory；
+- always skills / skill summary；
+- session summary；
+- channel/workspace-specific context。
 
-### TranscriptInput
+### build_messages / build_transcript
 
-AgentLoop 不必提前把所有内容拼死成一个 messages list，而是先组织：
+current Loop 使用 `TranscriptInput` 分离：
+- history；
+- current_message；
+- media；
+- session_summary；
+- runtime_context_blocks。
 
-```
-history
-current_message
-media
-session_summary
-runtime_context_blocks
-```
+再由 transcript builder 构造 provider-facing messages。
 
-Runner 通过 transcript builder 在需要时构造/重构 transcript，便于 compaction 与 provider state 兼容。
+### Prompt Cache 优化策略解读
 
-### Prompt Cache
+current 测试仍关注稳定 prefix。Identity/tool contract 的稳定部分尽量放前面，project/session/current input 等易变内容放后面，从而减少不必要的 cache invalidation。
 
-current-source 仍会尽量保持稳定 Prompt Prefix，让经常变化的内容靠后，从而提高支持缓存的 Provider 的命中机会。
+### 面试要点
+
+> “Session 保存的是 durable conversation state，ContextBuilder 决定本轮到底把哪些状态暴露给模型。这个分层对长对话、Project Workspace、多 Skill、Memory 都非常关键。”
+
 
 ## 4.5 MemoryStore - memory.py
 
 ### 文件定位
 
-```
+~~~text
 nanobot/agent/memory.py
-nanobot/agent/autocompact.py
-nanobot/session/manager.py
-```
+~~~
 
-### MemoryStore
+### 核心类：MemoryStore
 
 current 注释：
 
-```python
-"""Pure file I/O for memory files: MEMORY.md, history.jsonl, SOUL.md, USER.md."""
-```
+~~~text
+Pure file I/O for memory files:
+MEMORY.md, history.jsonl, SOUL.md, USER.md
+~~~
 
-管理：
+### read_memory() / write_memory()
 
-```
-memory/MEMORY.md
-memory/history.jsonl
-SOUL.md
-USER.md
-.cursor
-.dream_cursor
-legacy HISTORY.md
-GitStore
-```
+直接管理：
 
-### current Memory Pipeline
+~~~text
+workspace/memory/MEMORY.md
+~~~
 
-```
+### append_history()
+
+current append-only archive 是：
+
+~~~text
+workspace/memory/history.jsonl
+~~~
+
+写入前会做内部 reasoning 泄漏清洗、大小限制、cursor 分配等。
+
+### Consolidator 压缩机制
+
+新版关系：
+
+~~~text
 Session
-→ AutoCompact / Consolidator
+→ Consolidator / AutoCompact
 → history.jsonl
 → Dream
 → SOUL / USER / MEMORY
-→ ContextBuilder
-```
+~~~
 
-`HISTORY.md` 主要用于旧数据迁移；current 不再以旧 `save_memory` 虚拟工具为核心。
+旧 `memory/history.jsonl` 只在 migration 路径出现；旧 `Dream / MemoryStore` 虚拟工具不是 current 记忆更新主机制。
 
-### 为什么要 GitStore
+### GitStore
 
-Dream 是模型驱动的长期文件更新，因此 Durable Memory 需要 diff、审计与恢复，而不是“模型写了就永久信任”。
+Dream-managed durable files有 Git-backed audit/recovery，使模型驱动的长期记忆修改可追踪、可恢复。
+
 
 ## 4.6 SubagentManager - subagent.py
 
 ### 文件定位
 
-```
+~~~text
 nanobot/agent/subagent.py
-nanobot/agent/tools/spawn.py
-```
+~~~
 
 ### 核心类：SubagentManager
 
-current SubagentManager 负责 background/inline subagent execution，并复用：
+current 负责 background / inline subagent execution，并保存 task status、session ownership 与 concurrency capacity。
 
-```
-AgentRunner
-AgentRunSpec
-ToolLoader
-SkillsLoader
-WorkspaceScope
-```
+### spawn() 方法
 
-### spawn()
+概念流程：
 
-`spawn()` 创建 task_id/status，然后使用 `asyncio.create_task` 运行子任务；结果可通过主 Session 的 pending/injection 机制重新进入当前对话。
+~~~text
+spawn(task)
+→ 生成 task_id / status
+→ asyncio.create_task(_run_subagent)
+→ 记录 session → task mapping
+→ completion 后 cleanup
+→ 结果通过主 Session 的 pending/injection 路径重新进入 Agent
+~~~
 
-### current 并发约束
+current Subagent 使用 focused system prompt + scoped tools，并复用 `AgentRunner`。它的 max iterations 与主 runtime limit 对齐，不应再背“固定 current runtime/config 约束”。
 
-Subagent 的并发由：
+### 并发
 
-```
+独立配置：
+
+~~~text
 agents.defaults.maxConcurrentSubagents
-```
+~~~
 
-控制，current default 为 4；额外任务等待 capacity。
+current default 为 4，超过 capacity 的任务等待。
 
-不要继续背“Subagent 固定 15 次迭代”。current SubagentManager 的 `max_iterations` 与 AgentLoop/runtime settings 同步。
 
 ## 4.7 工具系统 - tools/
 
 ### 4.7.1 ToolRegistry - registry.py
 
-ToolRegistry 统一管理：
+ToolRegistry 统一提供：
+- register；
+- get；
+- tool_names；
+- get_definitions；
+- execute；
+- runtime context provider exposure。
 
-```
-register
-get / tool_names
-get_definitions
-execute
-runtime context providers
-```
+### ToolLoader
 
-### 4.7.2 ToolLoader - loader.py
+current default tools 通过：
 
-current default Tool 通过：
-
-```
+~~~text
 ToolContext
-→ ToolLoader
+→ ToolLoader.load()
 → ToolRegistry
-```
+~~~
 
-完成 discovery/构造/注册。
+完成 discovery 和作用域控制。
 
-### 4.7.3 MCPProvider - mcp.py
+### 4.7.2 MCP Tool - mcp.py
 
-MCPProvider 是 application-owned infrastructure：
+current `MCPProvider` 拥有 configured MCP connections 和 dynamic tool registrations。它与 AgentLoop 共享 ToolRegistry，但生命周期由 application composition root 管理。
 
-```
-shared ToolRegistry
-   ↑             ↑
-MCPProvider   AgentLoop
-```
+### 4.7.3 Message Tool
 
-它负责 MCP connect/reconnect/close 和动态 Tool Registration；AgentRunner 无需区分 Native Tool 与 MCP Tool。
+MessageTool 负责向当前 Channel/用户发送消息，最终仍经 delivery/channel callback，而不是让 AgentRunner 直接依赖平台 SDK。
 
-### 4.7.4 其他 current Tools
+### 4.7.4 Spawn Tool
 
-current 工具目录包括 Filesystem、Shell、Web、MCP、Cron、Image Generation、Runtime Self-inspection 等；具体可用集合由配置、Plugin、Session Policy 与 Scope 决定。
+Spawn/long-task 类工具通过 ToolContext 获取 `SubagentManager`，不需要在 Tool 内自己创建 Agent Runtime。
+
 
 ## 4.8 MessageBus - bus/
 
 ### 核心类：MessageBus
 
-current MessageBus 仍有：
+current MessageBus 仍是 Channel 与 Agent Core 的异步边界，但还承载 typed runtime/output event 的路由语义。
 
-```python
-self.inbound = asyncio.Queue()
-self.outbound = asyncio.Queue()
-```
+核心关系：
 
-并增加 typed event subscriber：
+~~~text
+Channel
+→ InboundMessage
+→ MessageBus
+→ AgentLoop
 
-- `publish_inbound()` / `consume_inbound()`
-- `publish_outbound()` / `consume_outbound()`
-- `publish()`：本地 subscriber
-- `publish_event()`：typed event → routed outbound
+AgentLoop/Runner
+→ EventSink / OutboundMessage
+→ MessageBus
+→ ChannelManager
+→ Channel
+~~~
 
-Channel adapters 决定如何把 typed event 投影到 Telegram/Feishu/WebSocket 等具体协议。
+不要把它只记成“两个 Queue”；真正有价值的是 transport/core 解耦。
+
 
 ## 4.9 Channel 适配层 - channels/
 
-### current 目录
+### 基类：BaseChannel
 
-```
-nanobot/channels/base.py
-nanobot/channels/manager.py
-nanobot/channels/<channel>/
-```
-
-current Channel 使用自包含 package discovery，而不是单个集中注册表硬编码所有平台。
-
-### BaseChannel
-
-负责平台适配的通用 contract；具体 Runtime 把外部事件转换为 `InboundMessage`，并把 `OutboundMessage`/typed event 发送回平台。
+Channel 负责把平台-specific payload 转为 Nanobot event contract，并把 OutboundMessage/stream event 发送回平台。
 
 ### ChannelManager
 
-负责 discovery、生命周期、出站 routing/retry 和 runtime status。
+current 负责：
+- package discovery / lifecycle；
+- outbound routing；
+- send retry；
+- streaming/progress event handling；
+- runtime status。
 
-### Feishu current-source
+### Telegram 适配器示例
 
-Feishu current guide 使用 WebSocket Long Connection，支持 QR Login 或 App ID/App Secret；不需要旧教程里的公网 Webhook + ngrok 作为默认方案。
+Telegram runtime 仍是一个 platform adapter，重点看：
+- update → InboundMessage；
+- media/thread metadata；
+- send/retry；
+- channel policy。
+
+### 飞书适配器示例
+
+current Feishu 支持长连接等 current setup flow；不要继续照旧版教程假设“必须搭公网 Webhook + ngrok”。平台连接方式应以 current channel package/docs 为准。
+
 
 ## 4.10 配置系统 - config/schema.py
 
-current 配置文件默认：
+### 配置数据类
 
-```
+current Config 基于 Pydantic schema，覆盖：
+- Agent defaults；
+- Model presets；
+- Providers；
+- Tools；
+- MCP Servers；
+- Channels；
+- Gateway；
+- Heartbeat / Dream；
+- Security / Web / Image generation 等。
+
+写回 Config 时官方文档优先 camelCase，同时兼容 snake_case。
+
+### 配置加载
+
+默认 Config：
+
+~~~text
 ~/.nanobot/config.json
-```
+~~~
 
-schema 支持 camelCase / snake_case 输入，但保存时使用 camelCase aliases。
+Agent Workspace：
 
-关键区域：
+~~~text
+~/.nanobot/workspace/
+~~~
 
-- `providers`
-- `modelPresets`
-- `agents.defaults`
-- `tools`
-- `channels`
-- `gateway`
-- API / transcription / image generation 等可选模块
+Session 默认放在 Config data dir 下的 workspace-scoped sessions 路径，而不是普通 Project Workspace 目录里。
 
-current loader 还包含旧配置迁移，例如旧 `tools.exec.restrictToWorkspace` 会迁移到 `tools.restrictToWorkspace`。
+loader 还包含 config migration，因此读 schema 时也要看 loader。
+
 
 ## 4.11 关键代码片段解读
 
-### 片段 1：真实 Turn Pipeline
+### 片段 1：完整的消息处理链路
 
-```python
-await self._run_turn_stage(ctx, "restore", self._restore_turn)
-await self._run_turn_stage(ctx, "compact", self._compact_session)
-if await self._run_turn_stage(ctx, "command", self._dispatch_command):
-    return ctx.outbound
-await self._run_turn_stage(ctx, "build", self._build_turn)
-await self._run_turn_stage(ctx, "run", self._run_turn)
-await self._run_turn_stage(ctx, "save", self._persist_turn)
-await self._run_turn_stage(ctx, "respond", self._prepare_outbound)
-```
+~~~text
+Channel
+→ InboundMessage
+→ AgentLoop.run
+→ _enqueue_session_message
+→ _run_session_queue
+→ _dispatch_one
+→ _process_message
+→ restore/compact/command/build/run/save/respond
+~~~
 
-### 片段 2：共享 ToolRegistry + MCP
+### 片段 2：Runner 入口
 
-```
-Composition Root
-├── tools = ToolRegistry()
-├── mcp = MCPProvider.from_config(config, tools)
-├── await mcp.connect()
-└── AgentLoop.from_config(config, tool_registry=tools)
-```
+~~~python
+result = await self.runner.run(
+    AgentRunSpec(
+        tools=effective_tools,
+        runtime=runtime,
+        transcript_input=transcript_input,
+        transcript_builder=transcript_builder,
+        concurrent_tools=True,
+        ...
+    )
+)
+~~~
 
-### 片段 3：全局并发
+### 片段 3：MCP 工具注册
 
-```python
-_max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "0"))
-gate = asyncio.Semaphore(_max) if _max > 0 else None
-```
+~~~text
+shared ToolRegistry
+→ MCPProvider.from_config(...)
+→ await connect()
+→ list remote capabilities
+→ wrap/register tools
+→ AgentRunner sees normal Tool definitions
+~~~
 
-这与旧版固定 `Semaphore(3)` 不同。
+### 片段 4：Provider Runtime
+
+Provider metadata、factory、model preset/runtime resolver 分离。一次 Turn 被 admit 后使用 immutable LLMRuntime snapshot，避免中途配置切换导致同一 Turn 前后不一致。
+
 
 ## 4.12 面试高频题
 
 ### Q1: 请描述 AgentLoop 的执行流程
 
-> 从 MessageBus 取 InboundMessage 后，先进入 per-session pending queue；single worker 保证 Session FIFO。_process_message 创建 TurnContext，依次执行 restore、compact、command、build、run、save、respond；run 阶段才进入 AgentRunner 的 Provider/Tool Loop。
+> “先做 Session admission，同 Session 进入同一 pending queue。_process_message 创建 TurnContext 后依次 restore、compact、command、build、run、save、respond；run 阶段把 AgentRunSpec 交给 AgentRunner，Runner 执行 Provider/Tool loop。”
 
-### Q2: AgentRunner 和 AgentLoop 的区别？
+### Q2: current Nanobot 的长期记忆怎么工作？
 
-> AgentLoop 面向产品层 Turn；AgentRunner 面向模型执行。Loop 管 Session/Workspace/Delivery，Runner 管 Provider/Tool/Streaming/Compaction。
+> “不再是 Dream / MemoryStore + memory/history.jsonl。短期是 Session JSONL；AutoCompact/Consolidator 把历史压缩归档到 memory/history.jsonl；Dream 再整理 SOUL.md、USER.md、MEMORY.md，并通过 GitStore 保留可审计/恢复记录。”
 
-### Q3: current Memory 怎么实现？
+### Q3: 工具结果为什么要有大小治理？
 
-> Session JSONL 保存结构化会话；AutoCompact/Consolidator 将旧上下文归档到 history.jsonl；Dream 再整理 SOUL/USER/MEMORY；ContextBuilder 后续选择性注入。
+> “Tool Result 会重新进入模型 Context，过大结果会推高 token、打爆 context window 并污染推理。因此 current runtime 有 maxToolResultChars 等治理，还可以 spill/compact，而不是依赖一个永远固定的 current maxToolResultChars 配置 常量。”
 
-### Q4: current MCP 怎么注册 Tool？
+### Q4: 如何新增 Provider？
 
-> Composition Root 创建 shared ToolRegistry 和 MCPProvider，MCPProvider connect 后向 Registry 动态注册；AgentLoop/Runner 使用同一 Registry。
-
-### Q5: Tool Result 为什么需要大小治理？
-
-> 防止单个 Observation 吞掉 Context Window、增加成本或造成 Provider 请求失败。current-source 将上限参数化为 `max_tool_result_chars`，并配合更完整的 Tool Result governance，而不是把实现理解成一个永远不变的 magic constant。
+优先看：
+1. `providers/registry.py` 是否可以用现有 OpenAI-compatible path；
+2. `config/schema.py` 增加配置；
+3. 只有协议不兼容时才增加专门 Provider implementation；
+4. 写 provider tests / mocked API path。
 
 ## 4.13 本章总结
 
@@ -534,12 +584,12 @@ gate = asyncio.Semaphore(_max) if _max > 0 else None
 │  agent/memory.py         │ MemoryStore      │ 记忆   │
 │  agent/subagent.py       │ SubagentManager  │ 子Agent│
 │  agent/tools/registry.py │ ToolRegistry     │ 工具   │
-│  agent/tools/mcp.py      │ MCPToolWrapper   │ MCP    │
+│  agent/tools/mcp.py      │ MCP tool adapter   │ MCP    │
 │  bus/message_bus.py      │ MessageBus       │ 消息   │
 │  channels/base.py        │ BaseChannel      │ 通道   │
 │  config/schema.py        │ NanobotConfig    │ 配置   │
 │                                                      │
-│  总代码量：约 4000 行 Python                           │
+│  总代码量：早期版本约 早期约 4000 行、current-source 已显著扩展；current-source 已明显扩展 Python                           │
 │  核心文件：10 个                                       │
 │  核心类：10 个                                         │
 │                                                      │
@@ -572,4 +622,4 @@ gate = asyncio.Semaphore(_max) if _max > 0 else None
 
 ---
 
-> 📝 **本章小结**：通过逐文件解读，我们看到 Nanobot 的 4000 行代码如何构建出一个完整的 Agent 框架。核心是 10 个文件、10 个类，每个类职责清晰。掌握这些源码细节，你就能在面试中自信地说"我通读了全部源码"，并能深入讨论任何实现细节。
+> 📝 **本章小结**：通过逐文件解读，我们看到 Nanobot 的 早期约 4000 行、current-source 已显著扩展代码如何构建出一个完整的 Agent 框架。核心是 10 个文件、10 个类，每个类职责清晰。掌握这些源码细节，你就能在面试中自信地说"我通读了全部源码"，并能深入讨论任何实现细节。
