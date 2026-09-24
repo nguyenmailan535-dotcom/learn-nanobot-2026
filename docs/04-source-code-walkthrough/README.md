@@ -27,7 +27,7 @@
 
 ## 4.1 源码目录结构总览
 
-current-source 已显著扩展。第一次走读不要试图完整展开全部目录，只抓主链：
+原版教程按“约 4000 行 / 10 个核心文件”组织源码阅读，这个数字已经不符合 current-source。章节结构保留，但阅读方法改为**按调用链聚焦核心文件**。
 
 ~~~text
 nanobot/
@@ -44,8 +44,6 @@ nanobot/
 │   ├── skills.py
 │   ├── plugins.py
 │   └── tools/
-│       ├── base.py
-│       ├── schema.py
 │       ├── registry.py
 │       ├── loader.py
 │       ├── filesystem.py
@@ -57,12 +55,29 @@ nanobot/
 ├── channels/
 │   ├── base.py
 │   └── manager.py
-├── cron/
-└── security/
+└── config/
+    ├── schema.py
+    ├── loader.py
+    └── paths.py
 ~~~
 
-推荐同时打开 `tests/agent/`、`tests/tools/`、`tests/session/`。Test 往往比注释更精确地描述 current contract。
+### 推荐源码阅读顺序
 
+不要从第一行“通读整个仓库”。用一条真实 Turn：
+
+~~~text
+InboundMessage
+→ AgentLoop
+→ ContextBuilder
+→ AgentRunSpec
+→ AgentRunner
+→ ToolRegistry
+→ AgentRunResult
+→ Session Save
+→ OutboundMessage
+~~~
+
+然后再分别扩展 Memory、MCP、Subagent、Channel。
 
 ## 4.2 AgentLoop - loop.py
 
@@ -572,45 +587,32 @@ Provider metadata、factory、model preset/runtime resolver 分离。一次 Turn
 
 ## 4.13 本章总结
 
-```
-┌──────────────────────────────────────────────────────┐
-│                   核心文件速查表                       │
-│                                                      │
-│  文件                    │ 核心类           │ 职责    │
-│  ─────────────────────────────────────────────────── │
-│  agent/loop.py           │ AgentLoop        │ 消息消费│
-│  agent/runner.py         │ AgentRunner      │ ReAct  │
-│  agent/context.py        │ ContextBuilder   │ Prompt │
-│  agent/memory.py         │ MemoryStore      │ 记忆   │
-│  agent/subagent.py       │ SubagentManager  │ 子Agent│
-│  agent/tools/registry.py │ ToolRegistry     │ 工具   │
-│  agent/tools/mcp.py      │ MCP tool adapter   │ MCP    │
-│  bus/message_bus.py      │ MessageBus       │ 消息   │
-│  channels/base.py        │ BaseChannel      │ 通道   │
-│  config/schema.py        │ NanobotConfig    │ 配置   │
-│                                                      │
-│  总代码量：早期版本约 早期约 4000 行、current-source 已显著扩展；current-source 已明显扩展 Python                           │
-│  核心文件：10 个                                       │
-│  核心类：10 个                                         │
-│                                                      │
-└──────────────────────────────────────────────────────┘
-```
+### Current-source 核心链路
+
+~~~text
+Channel
+→ InboundMessage
+→ MessageBus
+→ per-session FIFO
+→ TurnContext
+→ restore / compact / command / build / run / save / respond
+→ AgentRunSpec
+→ AgentRunner
+→ Provider / ToolRegistry
+→ AgentRunResult
+→ Session Persistence
+→ TurnDelivery
+~~~
 
 ### 源码阅读建议
 
-```
-推荐阅读顺序：
+1. **不要追求“全部读完”**：优先理解稳定 Runtime Boundary。
+2. **每次只追一个问题**：例如“第一次进入 Runner 前 messages 如何形成”。
+3. **实现和 Test 一起看**：Test 往往比注释更精确地定义 Contract。
+4. **记录输入/输出/下一跳**：避免只记类名。
+5. **做最小实验**：Source Trace 必须能用 breakpoint/log/test 验证。
 
-1. config/schema.py     → 理解配置结构
-2. bus/message_bus.py    → 理解消息传递
-3. agent/loop.py         → 理解消息消费
-4. agent/runner.py       → 理解 ReAct 循环（核心！）
-5. agent/context.py      → 理解 Prompt 构建
-6. agent/memory.py       → 理解记忆系统
-7. agent/tools/          → 理解工具系统
-8. channels/             → 理解平台适配
-9. providers/            → 理解 LLM 封装
-```
+> 📝 **本章小结**：current Nanobot 已明显大于早期教学版本。真正有面试价值的不是声称“读过全部源码”，而是能准确解释一条真实 Turn 如何跨越 Channel、Session、Context、Runner、Tool、Persistence 与 Delivery，并说明每个边界为什么存在。
 
 ---
 
