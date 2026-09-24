@@ -1,7 +1,7 @@
 # 08 - 技能与工具
 
 > **阅读时间**：约 2 小时  
-> **前置知识**：[07 - 记忆系统实战](../07-memory-and-dream/README.md)  
+> **前置知识**：[07 - 记忆系统实战](../07-memory-system/README.md)  
 > **学习目标**：掌握 Nanobot 的 Skill 系统、内置工具体系、MCP 工具集成，能够自定义 Skill
 
 ---
@@ -146,460 +146,198 @@ metadata: '{"nanobot.requires.bins": ["git", "gh"], "nanobot.requires.env": ["GI
 
 ## 8.3 YAML Frontmatter 字段详解
 
-### 8.3.1 必填字段
+current `SkillsLoader` 会解析 SKILL.md 的 YAML Frontmatter，并至少校验：
 
-current `SkillsLoader` 会验证 Agent Skills identity：
+- `name` 与 Skill 目录名一致
+- name 符合格式与长度要求
+- `description` 存在且长度合法
 
-| 字段 | 说明 |
-|---|---|
-| `name` | 必须与 Skill 目录名一致，满足命名规则 |
-| `description` | 1-1024 字符，用于 Skill Summary / Discovery |
+还可以通过 Nanobot metadata 表达：
 
-最小示例：
+- always
+- requires.bins
+- requires.env
 
-```yaml
----
-name: literature-analysis
-description: Analyze research papers with evidence-first retrieval and citations.
----
-```
-
-### 8.3.2 可选字段
-
-current-source 支持 Nanobot/OpenClaw compatibility metadata。例如：
-
-```yaml
----
-name: github
-description: Interact with GitHub using the gh CLI.
-metadata:
-  nanobot:
-    emoji: "🐙"
-    requires:
-      bins: ["gh"]
-      env: []
----
-```
-
-常见 metadata：
-
-- `requires.bins`：依赖的本地命令；
-- `requires.env`：依赖的环境变量；
-- `always`：Nanobot-specific always-active 语义；
-- 安装提示 / emoji 等 UI metadata。
-
-### 8.3.3 always 字段详解
-
-current loader 为兼容旧 Skill，同时识别：
-
-```yaml
-always: true
-```
-
-以及：
-
-```yaml
-metadata:
-  nanobot:
-    always: true
-```
-
-但不要滥用。
-
-```text
-always=true
-→ Full Skill Instructions 每轮活跃
-→ Context token 增长
-→ Instruction collision 风险增长
-```
-
-大多数 Skill 更适合默认按需加载。
-
-### 8.3.4 metadata 与依赖检查
-
-`SkillsLoader` 会读取 `metadata.nanobot.requires`，检查：
-
-```text
-bins → shutil.which()
-env  → os.environ
-```
-
-依赖不满足的 Skill 可以出现在 Summary 中，但标记 unavailable，使 Agent 知道为什么当前不能用。
+> 原版教程中的字段概念可以继续使用，但应以 current `nanobot/agent/skills.py` 的 parser/validation 为准，不要把旧 schema 当成永久固定协议。
 
 ---
 
 ## 8.4 技能发现机制
 
-### 8.4.1 搜索路径
+### 8.4.1 current 搜索来源
 
-current-source 有三类来源：
-
-```text
-<workspace>/skills/             # Workspace Skills
-<workspace>/plugins/*/skills/   # Enabled Agent Plugin Skills
-nanobot/skills/                 # Built-in Skills
+```
+1. Workspace Skills
+2. Enabled Agent Plugin Skills
+3. Built-in Skills
 ```
 
-### 8.4.2 发现流程
+current loader 使用 seen_names 去重，因此概念优先级是：
 
-```text
-Workspace Skills
-    ↓
-Enabled Agent Plugin Skills
-    ↓
-Built-in Skills
-    ↓
-disabledSkills filter
-    ↓
-requirements filter
-    ↓
-Skills Summary / Active Skills
+```
+workspace > plugin > built-in
 ```
 
-### 8.4.3 覆盖机制
+### 8.4.2 Disabled Skills 与 Requirements
 
-current `list_skills()` 使用 `seen_names`，所以优先级可理解为：
+`disabled_skills` 会从可用集合移除 Skill；若 metadata 要求的 binary/env 不满足，Skill 可以显示为 unavailable。
 
-```text
-Workspace > Enabled Plugin > Built-in
-```
+### 8.4.3 Agent Plugin Skill
 
-这允许你在 Workspace 中用同名 Skill 覆盖系统默认，而不用修改安装包源码。
-
-### 8.4.4 Agent Plugin 是 current 新边界
-
-current `nanobot/agent/plugins.py` 支持 Agent Plugins v1。
-
-典型：
-
-```text
-workspace/plugins/research-agent/
-├── plugin.json
-├── mcp.json
-└── skills/
-    └── literature-analysis/
-        └── SKILL.md
-```
-
-Plugin 可以把：
-
-```text
-Skill instructions
-+
-MCP capabilities
-```
-
-一起安装和启用。
-
-current loader 还会：
-
-- 校验 manifest/schema；
-- 做 path containment；
-- 对 package 内容做 fingerprint；
-- 区分 installed 与 enabled。
-
-> 💡 **安全思想**：用户授权的是某个被审查过的 capability package，不是“这个目录名以后无论被替换成什么都继续信任”。
+Plugin Skill 只有在 Plugin 被明确启用且 package 校验通过后才会进入 SkillsLoader。
 
 ---
 
 ## 8.5 渐进披露（Progressive Disclosure）
 
-### 8.5.1 为什么需要渐进披露
+### 8.5.1 为什么需要
 
-如果 30 个 Skill 每个几千字全部进入 System Prompt：
+如果所有 SKILL.md 全文都进 System Prompt，会产生：
 
-```text
-大量 Token
-+ 无关指令干扰
-+ Prompt Cache 失效概率上升
+- Token 浪费
+- Instruction Collision
+- Prompt Cache 波动
+- 无关能力干扰
+
+### 8.5.2 current 实现
+
+`build_skills_summary()` 默认只暴露：
+
 ```
-
-所以 current-source 默认先使用 Summary。
-
-### 8.5.2 三层渐进披露设计
-
-可以继续沿用原教程的三层理解，但 current 实现更具体：
-
-**Level 1：Discovery Metadata**
-
-`build_skills_summary()` 给出：
-
-```text
 name
 description
-safe display path
+path
 availability
 ```
 
-**Level 2：Active / Explicit Skill Body**
+需要时再读取完整 SKILL.md。
 
-用户可以显式：
+### 8.5.3 Explicit Invocation
 
-```text
-$literature-analysis
+current 还支持用户文本中的：
+
+```
+$skill-name
 ```
 
-`SkillsLoader.build_explicit_skill_runtime_context()` 会把完整 Skill Body 作为本 Turn 的 RuntimeContextBlock 注入。
+`get_explicitly_invoked_skills()` 解析后，通过 RuntimeContextBlock 把完整 Skill Body 作为当前 Turn Active Skill 注入。
 
-**Level 3：Skill References / Bundled Resources**
+### 8.5.4 always Skill
 
-复杂 Skill 可以把详细材料放在 references/scripts/assets 中，SKILL.md 保持核心工作流简洁，并在需要时让 Agent 读取对应文件。
+`get_always_skills()` 仍会把 always Skill 直接作为 active instructions。不要滥用，否则又会造成 Context Bloat。
 
-### 8.5.3 always: true 的特殊处理
-
-`get_always_skills()` 会在满足 requirements 时返回 always Skill。
-
-适合：
-
-- 每轮都必须遵守的极少量工作协议；
-- 极短、稳定的核心约束。
-
-不适合：
-
-- 长文档；
-- 偶尔使用的工具教程；
-- 大量领域知识。
-
-### 8.5.4 显式 Skill 调用
-
-current-source 支持 `$skill-name`。
-
-例如：
-
-```text
-Use $literature-analysis to compare these three papers.
-```
-
-相比让模型自己猜 Skill，这种方式：
-
-- 可控；
-- 方便测试；
-- 适合做 A/B Eval。
+---
 
 ## 8.6 内置技能列表
 
-Built-in Skills 会随 current-source 演进，不建议背一个固定“完整列表”。
+内置 Skill 会随 current-source 变化，不应把某个固定列表背成永久事实。
 
-2026-09-24 源码中可见的代表包括：
+源码入口：
 
-| Skill | 用途 |
-|---|---|
-| `cron` | 定时提醒/任务 |
-| `github` | 使用 `gh` CLI |
-| `memory` | 搜索 history log |
-| `image-generation` | 图像生成工作流 |
-| `skill-creator` | 创建/维护 Agent Skills |
-| `summarize` | URL/文件/视频摘要 |
-| `clawhub` | 搜索/安装公共 Skill |
-| `my` | Runtime 自检/自省 |
-
-真正运行时请用：
-
-```text
-/skill
+```
+nanobot/skills/
+nanobot/agent/skills.py
 ```
 
-或 `SkillsLoader.list_skills()` 查看当前安装版本。
+面试更应该讲：
+
+- Skill discovery
+- progressive loading
+- requirement checking
+- workspace/plugin/builtin precedence
+
+而不是背当前恰好有几个 Skill。
 
 ---
 
 ## 8.7 内置工具完整列表
 
-### 8.7.1 工具总览
+Tool 也会随版本变化。current architecture 文档给出的主要 Tool Area 包括：
 
-current Tool 同样是 discovery-driven，不要把教程中的表当永久闭集。
+| Area | current-source |
+|---|---|
+| Filesystem | `agent/tools/filesystem.py` |
+| Shell | `agent/tools/shell.py` |
+| Web | `agent/tools/web.py` |
+| MCP | `agent/tools/mcp.py` |
+| Cron | `agent/tools/cron.py` |
+| Image Generation | `agent/tools/image_generation.py` |
+| Runtime Self-inspection | `agent/tools/self.py` |
+| Spawn/Subagent | `agent/tools/spawn.py` |
 
-主要类别：
+实际可见 Tool 取决于：
 
-```text
-Filesystem
-Shell
-Search / Web
-MCP
-Cron / Automations
-Subagent
-Long-running Task / Goal
-Image Generation
-Notebook / Patch
-Runtime Self-inspection
-Message / Delivery
-```
-
-### 8.7.2 文件操作工具
-
-重点不是名字，而是理解安全边界：
-
-- effective Project Workspace；
-- `tools.restrictToWorkspace`；
-- file state tracking；
-- read/write/edit/patch/search 各自 contract。
-
-### 8.7.3 Shell 执行工具
-
-Shell Tool 受：
-
-- enable/disable；
-- Working Directory；
-- Restrict-to-Workspace guard；
-- dangerous pattern checks；
-- optional OS sandbox；
-- allowed env keys；
-
-共同治理。
-
-### 8.7.4 Web 工具
-
-Web Search / Fetch 还受：
-
-- provider config；
-- URL policy；
-- SSRF guard；
-- private address whitelist；
-
-约束。
-
-### 8.7.5 通信工具
-
-普通最终回复通过 TurnDelivery/Channel；Message Tool 用于需要显式发送某些消息或媒体的场景。
-
-### 8.7.6 调度工具
-
-current `cron` Tool 支持 reminder/task/one-time 等模式，底层是 workspace-scoped `CronService`。
-
-Heartbeat 是 Gateway 管理的 protected system cron job，不是普通用户 Cron 的别名。
-
-### 8.7.7 并发工具
-
-Subagent Tool 通过 `SubagentManager` 创建 background/inline execution；current 默认最大并发 Subagent 数为 4，可配置。
+- Config
+- Plugin
+- Session Policy
+- Workspace Scope
+- Runtime Capability
 
 ---
 
 ## 8.8 ToolRegistry 统一注册与执行机制
 
-### 8.8.1 ToolRegistry 架构
+### 8.8.1 ToolRegistry
 
-```text
-Tool Sources
-├── Built-in ToolLoader
-├── Plugin Entry Points
-└── MCPProvider
-        ↓
-   ToolRegistry
-        ↓
-get_definitions()
-        ↓
-AgentRunner / Provider
-        ↓
-Tool Call
-        ↓
-execute(name, args)
+统一负责：
+
+```
+register
+get
+tool_names
+get_definitions
+execute
+runtime context provider
 ```
 
-### 8.8.2 注册流程
+### 8.8.2 ToolLoader
 
-AgentLoop 的默认 Tool 通过：
+current default tools 通过：
 
-```text
+```
 ToolContext
-→ ToolLoader.load()
-→ ToolRegistry.register()
+→ ToolLoader
+→ ToolRegistry
 ```
 
-MCP Tool 则由 application-owned `MCPProvider` 连接后动态注册到同一个 Registry。
+构造和注册。
 
-### 8.8.3 执行流程
+### 8.8.3 Model-facing Contract
 
-AgentRunner 不需要知道能力来自哪一层：
-
-```text
-tool_call.name
-→ ToolRegistry lookup
-→ validation / execution
-→ result governance
-→ Tool Result Message
-→ Provider next iteration
-```
-
-### 8.8.4 工具定义的 JSON Schema 格式
-
-模型看到的是稳定的 Tool Contract：
-
-```json
-{
-  "name": "search_papers",
-  "description": "Search the indexed paper corpus.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "query": {"type": "string"},
-      "top_k": {"type": "integer"}
-    },
-    "required": ["query"]
-  }
-}
-```
-
-Tool Schema 是 model-facing API，改字段名/描述也可能改变模型 Tool Selection。
+Tool Name、Description、JSON Schema、Error Message 都会影响模型决策，因此它们属于 model-facing API。
 
 ---
 
 ## 8.9 MCP 工具集成
 
+current-source 不再只把 MCP 理解成一个静态 `MCPToolWrapper`。
+
 ### 8.9.1 MCPProvider
 
-current-source 的连接 owner 是 `MCPProvider`，不是旧教程中 AgentLoop 内部固定的 MCP wrapper list。
-
-```text
-Config / Agent Plugin
-→ MCPProvider.connect()
-→ discover tools/resources/prompts
-→ enabledTools filter
-→ wrappers
-→ shared ToolRegistry
+```
+Application Composition Root
+├── shared ToolRegistry
+├── MCPProvider
+└── AgentLoop
 ```
 
-### 8.9.2 转换过程
+MCPProvider connect 后动态发现/注册 Tool，并在 shutdown 时 close connections。
 
-MCP Tool 的 JSON Schema 会经过 adapter 变成 Nanobot Tool contract，最终对 AgentRunner 与 Native Tool 保持统一。
+### 8.9.2 enabledTools
 
-### 8.9.3 MCP 工具的命名规范
+MCPServerConfig 可以限制 Agent 实际可见 capability，实现最小权限。
 
-Server capability 会映射为避免冲突的 wrapped name。实际名字应以连接日志和 ToolRegistry 为准，不要依赖旧教程中固定拼接规则。
+### 8.9.3 Agent Plugin
 
-### 8.9.4 配置 MCP Server
+Agent Plugin 可以同时打包：
 
-current `~/.nanobot/config.json`：
-
-```json
-{
-  "tools": {
-    "mcpServers": {
-      "filesystem": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/safe/path"],
-        "enabledTools": ["read_file"]
-      }
-    }
-  }
-}
+```
+Skill
++
+MCP Server
 ```
 
-WebUI 也可以在 Apps 页面添加 MCP。
-
-### 8.9.5 Agent Plugin：Skill + MCP 打包
-
-对 ResearchPilot，推荐最终结构：
-
-```text
-research-plugin/
-├── plugin.json
-├── mcp.json
-└── skills/
-    └── literature-analysis/
-        └── SKILL.md
-```
-
-Skill 进入 Context，MCP Tool 进入 ToolRegistry；Plugin 只是二者的安装/授权边界。
+Skill 进入 Context，MCP Tool 进入 ToolRegistry。两者是不同抽象。
 
 ## 8.10 自定义 Skill 编写实战
 
@@ -792,110 +530,57 @@ always: false
 
 ## 8.11 工具安全机制
 
-### 8.11.1 restrictToWorkspace
+current-source 的 Tool Security 不能只靠“Prompt 提醒模型不要乱做”。
 
-current config：
+### Workspace Boundary
 
-```text
+```
 tools.restrictToWorkspace
 ```
 
-这是 **application-level workspace guard**，限制文件 Tool 与 Shell Working Directory 等访问边界。
+限制普通文件访问；effective Project Workspace 决定相对路径边界。
 
-它不是 OS sandbox。
+### Exec Sandbox
 
-### 8.11.2 exec 工具的安全层
-
-current 推荐生产环境叠加：
-
-```text
-tools.restrictToWorkspace = true
-+
-tools.exec.sandbox = "bwrap"     # Linux
-或 "seatbelt"                    # macOS
+```
+tools.exec.sandbox
 ```
 
-Windows 没有 bwrap；应保持 Workspace Restriction，并谨慎决定是否开放 Shell。
+current 支持 Linux `bwrap`、macOS `seatbelt` 等 OS 级隔离。Workspace Guard 是应用层边界，Sandbox 是进程级边界，两者可以叠加。
 
-### 8.11.3 web_fetch / HTTP MCP 的 SSRF 防护
+### SSRF
 
-HTTP Web Fetch 与 HTTP/SSE MCP 都使用 SSRF 防护。
+Web Fetch 与 HTTP/SSE MCP 使用网络安全检查；如确需访问私有目标，只应使用窄范围 `tools.ssrfWhitelist`。
 
-私有地址如果确实需要访问，只加入窄范围：
+### MCP 最小权限
 
-```text
-tools.ssrfWhitelist
-```
+通过 `enabledTools` 只暴露需要的 MCP Capability。
 
-不要为了调通直接放开整个私网段。
+### Session Policy
 
-### 8.11.4 最小工具权限
-
-MCP Server 使用 `enabledTools`；Session 也可以有 disabled tools policy。
-
-原则：
-
-> Server/Runtime “能提供”什么，不等于某个 Agent/Session “应该拥有”什么。
+某个 Session 还可以通过 disabled tools 得到受限 ToolRegistry。
 
 ## 8.12 面试高频题
 
-### 题目 1：Nanobot 的工具系统是如何设计的？
+### 题目 1：Skill 和 Tool 有什么区别？
 
-> **参考回答**：
->
-> "Nanobot 的工具系统基于 **ToolRegistry 统一注册机制**。所有工具——无论是内置工具（read_file、exec 等）还是 MCP 外部工具——都通过 ToolRegistry 统一注册和执行。
->
-> 每个工具包含三部分：**工具定义**（JSON Schema 格式，描述参数）、**执行函数**（实际的业务逻辑）、**安全约束**（权限检查、路径限制等）。
->
-> 工具定义会作为 Tool Definition 发送给 LLM，LLM 决定何时调用什么工具。调用请求返回后，ToolRegistry 根据工具名找到对应的 handler 执行，并将结果以 tool message 返回给 LLM。
->
-> 对于 MCP 外部工具，通过 MCPToolWrapper 将 MCP 协议的工具格式转换为内置格式，然后统一注册到 ToolRegistry。这样 Agent 无需区分工具来源，使用方式完全一致。"
+> Tool 是可执行 Capability，进入 ToolRegistry；Skill 是行为/方法 Instruction，进入 Context。Agent Plugin 可以同时携带二者，但不应该混为一谈。
 
-### 题目 2：Skill 和 Tool 的区别是什么？
+### 题目 2：Nanobot 如何做 Progressive Disclosure？
 
-> **参考回答**：
->
-> "Skill 和 Tool 在 Nanobot 中是两个不同层次的概念。
->
-> **Tool 是细粒度的原子操作**，比如 read_file 读文件、exec 执行命令、web_search 搜索网页。每个 Tool 有明确的参数定义和执行逻辑，通过 ToolRegistry 注册，以 JSON Schema 格式暴露给 LLM。
->
-> **Skill 是粗粒度的能力模块**，本质上是一个 Markdown 文件（SKILL.md），告诉 Agent'你能做什么、怎么做'。一个 Skill 通常会教 Agent 如何组合使用多个 Tool 来完成复杂任务。比如 GitHub Skill 教 Agent 如何组合使用 exec（运行 git 命令）和 read_file（读取代码）来完成代码审查。
->
-> 简单类比：Tool 是锤子、螺丝刀这些工具，Skill 是'如何组装家具'的说明书。"
+> 先通过 Skills Summary 暴露 name/description/path/availability，需要时再读取完整 SKILL.md；用户还可以用 `$skill-name` 显式激活当前 Turn。
 
-### 题目 3：什么是渐进披露？在 Nanobot 中如何应用？
+### 题目 3：Skill 的优先级？
 
-> **参考回答**：
->
-> "渐进披露（Progressive Disclosure）是 UI/UX 设计中的经典原则——先展示概要，让用户按需深入细节。Nanobot 将这个原则创造性地应用到了 Agent 的 Prompt 管理中。
->
-> 具体实现是三层结构：
->
-> **Tier 1**：所有技能的 name 和 description 组成一个摘要列表，始终注入 System Prompt，大约消耗 100-500 tokens。Agent 通过摘要知道自己有哪些能力。
->
-> **Tier 2**：当 Agent 判断某个技能与当前任务相关时，主动调用 read_file 读取完整的 SKILL.md，获取详细的使用说明。
->
-> **Tier 3**：如果需要更深入的信息（参考文档、辅助脚本），Agent 继续访问 references/ 和 scripts/ 目录。
->
-> 唯一的例外是标记了 `always: true` 的技能，它们跳过渐进披露，全文注入 System Prompt。
->
-> 这种设计的价值在于 token 管理——如果有 20 个技能全部注入，可能消耗 1 万 token；使用渐进披露后，常态只消耗 300 token，按需加载时才产生额外消耗。"
+> current discovery 顺序可以理解为 Workspace > Enabled Plugin > Built-in，同名时更高优先级来源先占用。
 
-### 题目 4：如何为 Nanobot 添加一个新的工具？
+### 题目 4：MCP Tool 如何进入 ToolRegistry？
 
-> **参考回答**：
->
-> "有三种方式：
->
-> 第一种是**写 Skill**——不需要写代码，只需创建一个 SKILL.md 文件，用 Markdown 描述这个能力的使用方式。Agent 会基于已有的 Tool（exec、web_fetch 等）来执行。这适合流程性、指导性的扩展。
->
-> 第二种是**接入 MCP Server**——如果需要专用的 API 调用或复杂逻辑，可以开发一个 MCP Server，Nanobot 通过 MCPToolWrapper 自动将其工具转换为内置格式注册到 ToolRegistry。
->
-> 第三种是**修改源码**——在 ToolRegistry 中直接注册新的工具函数。这种方式最灵活但需要修改框架代码，不太适合分发。
->
-> 推荐优先级：Skill > MCP Server > 源码修改。Skill 是最轻量的方式，MCP Server 提供了标准化的扩展接口。"
+> application-owned MCPProvider 使用 shared ToolRegistry，连接 Server 后动态注册；AgentRunner 只看统一 Tool Contract。
 
----
+### 题目 5：为什么 Plugin 要显式 Enable 和 Fingerprint？
+
+> Installed 不等于 Trusted。current Plugin Loader 会验证 Manifest、Containment 与 Package Fingerprint，避免 package 后续被替换却静默继承授权。
 
 ## 8.13 本章小结
 
@@ -945,4 +630,4 @@ MCP Server 使用 `enabledTools`；Session 也可以有 disabled tools policy。
 
 ---
 
-> **下一章**：[09 - 多平台接入](../09-mcp-integration/README.md) —— 了解 Nanobot 如何同时接入 Telegram、Discord、飞书、钉钉等 8+ 平台
+> **下一章**：[09 - 多平台接入](../09-multi-platform/README.md) —— 了解 Nanobot 如何同时接入 Telegram、Discord、飞书、钉钉等 8+ 平台
