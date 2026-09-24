@@ -2,6 +2,15 @@
 
 本仓库按 **2026-09-24 的 `HKUDS/nanobot` `main`** 组织。
 
+为避免“main 会继续移动”造成歧义，本轮校对使用的具体快照为：
+
+```text
+62aa6ba6a33790a656b952ef150517bd70d6eb30
+committer time: 2026-09-24T11:55:21Z
+```
+
+后续如果 upstream main 继续变化，应先比较这个 SHA 再更新本仓库。
+
 
 ## Stable vs main
 
