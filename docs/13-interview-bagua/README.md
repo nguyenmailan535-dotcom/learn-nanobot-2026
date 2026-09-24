@@ -1,6 +1,6 @@
 # 第13章 AI Agent / 后端面试八股文大全（150题）
 
-> 🎯 本章定位：面试前突击宝典，覆盖 Agent 基础、Nanobot 源码、MCP 协议、大模型原理、训练优化、RAG、多智能体、系统设计、工程实践九大板块，共 134 道高频面试题，每题附详细答案与加分点。
+> 🎯 本章定位：保留原版 134 道高频题中对后端/Agent 开发仍有价值的主体内容，并新增 16 道 2026 工程补充题（Q135-Q150），共 150 题。Nanobot 专项答案按 2026-09-24 current-source 校正。
 
 ---
 
@@ -16,6 +16,7 @@
 - [八、多智能体（Q111-Q118）](#八多智能体q111-q118)
 - [九、系统设计（Q119-Q126）](#九系统设计q119-q126)
 - [十、工程实践（Q127-Q134）](#十工程实践q127-q134)
+- [十一、2026 工程补充题（Q135-Q150）](#十一2026-工程补充题q135-q150)
 
 ---
 
@@ -31,7 +32,7 @@
 
 ### Q2. 请解释 ReAct（Reasoning + Acting）框架的核心思想
 
-**答案：** ReAct 框架由 Yao et al. (2022) 提出，核心思想是将大模型的**推理（Reasoning）**和**行动（Acting）**交替进行。具体流程为：模型先产生一段 Thought（思考当前情况、分析下一步该做什么），然后选择一个 Action（如调用搜索工具），得到 Observation（工具返回结果），再进入下一轮 Thought-Action-Observation 循环，直到得出最终答案。ReAct 的关键优势在于：相比纯 Chain-of-Thought 只推理不行动，它能获取实时外部信息；相比纯 Act 模式（直接调用工具），它增加了推理链使行为可解释、可调试。Nanobot 的 AgentLoop 本质上就是一个 ReAct 循环实现。
+**答案：** ReAct 框架由 Yao et al. (2022) 提出，核心思想是将大模型的**推理（Reasoning）**和**行动（Acting）**交替进行。具体流程为：模型先产生一段 Thought（思考当前情况、分析下一步该做什么），然后选择一个 Action（如调用搜索工具），得到 Observation（工具返回结果），再进入下一轮 Thought-Action-Observation 循环，直到得出最终答案。ReAct 的关键优势在于：相比纯 Chain-of-Thought 只推理不行动，它能获取实时外部信息；相比纯 Act 模式（直接调用工具），它增加了推理链使行为可解释、可调试。在 Nanobot current-source 中，面向模型的 ReAct / provider-tool loop 主要由 `AgentRunner` 承担，`AgentLoop` 则负责 Session、Context、Workspace、Persistence 与 Delivery 等 Turn 编排。
 
 **面试加分点：** 能说出 ReAct 论文的全称「ReAct: Synergizing Reasoning and Acting in Language Models」，并能对比 ReAct 与 Reflexion、Plan-and-Solve 等其他推理框架的差异。
 
@@ -64,7 +65,7 @@ Session JSONL
 
 ### Q5. 什么是工具调用（Tool Calling）？它在 Agent 中的作用是什么？
 
-**答案：** 工具调用是 Agent 与外部世界交互的核心机制。在技术实现上，模型在生成回复时，可以选择输出一个特殊格式的结构化指令（通常是 JSON 格式），指定要调用的工具名称和参数。运行时框架（如 Nanobot 的 AgentLoop）解析这个指令，执行对应的工具函数，将结果以 `tool_result` 消息的形式追加到对话历史中，再由模型继续生成下一步。工具调用使 Agent 能力从「纯文本生成」扩展到「读写文件、执行代码、查询数据库、调用 API」等几乎无限的操作空间。核心挑战包括：工具选择的准确性、参数生成的正确性、错误处理的鲁棒性。
+**答案：** 工具调用是 Agent 与外部世界交互的核心机制。在技术实现上，模型在生成回复时，可以选择输出一个特殊格式的结构化指令（通常是 JSON 格式），指定要调用的工具名称和参数。运行时框架解析这个指令，执行对应工具，将 Tool Result 追加回模型对话，再继续下一轮。在 Nanobot current-source 中，这段 model/tool execution 主要由 `AgentRunner` 配合 `ToolRegistry` 完成。工具调用使 Agent 能力从「纯文本生成」扩展到「读写文件、执行代码、查询数据库、调用 API」等几乎无限的操作空间。核心挑战包括：工具选择的准确性、参数生成的正确性、错误处理的鲁棒性。
 
 **面试加分点：** 能对比 OpenAI 的 Function Calling 和 MCP 协议的工具调用机制差异，前者是模型提供商特定格式，后者是开放协议标准。
 
@@ -74,7 +75,7 @@ Session JSONL
 
 **答案：** Agent 工具选择的策略主要有：（1）**全量注入**：将所有可用工具的描述放入 system prompt，由 LLM 自主选择。简单直接但 tool 数量多时会占用大量上下文空间。（2）**渐进披露（Progressive Disclosure）**：先给模型少量核心工具，当模型需要特定能力时再动态加载。Nanobot 的 Skills 系统就采用这种策略，通过 `description` 字段让模型判断是否需要读取完整 Skill 文件。（3）**语义检索**：将工具描述向量化，根据当前任务语义检索最相关的 Top-K 工具注入。（4）**分层路由**：先由一个「路由模型」判断任务类型，再加载对应类别的工具集。实际工程中通常组合使用这些策略。
 
-**面试加分点：** 提到 Nanobot 中 `_TOOL_RESULT_MAX_CHARS = 16000` 的截断设计，说明工具调用结果也需要控制大小以保护上下文窗口。
+**面试加分点：** 不要背旧版固定 `_TOOL_RESULT_MAX_CHARS = 16000`。current-source 使用可配置的 `maxToolResultChars` 与 Tool Result governance（截断/治理/必要时 spill）保护上下文窗口。
 
 ---
 
@@ -136,7 +137,7 @@ Nanobot current-source 的对应机制包括：
 
 ### Q12. 如何保证 Agent 工具调用的可靠性？
 
-**答案：** 保证工具调用可靠性需要多层防护：（1）**输入验证**：通过 JSON Schema 定义工具参数的类型和约束，在调用前验证参数合法性。Nanobot 的 ToolRegistry 就使用 `input_schema` 字段定义参数规范。（2）**超时控制**：为每个工具调用设置合理的超时时间，避免单个工具阻塞整个 Agent 循环。（3）**重试机制**：对于可重试的错误（如网络超时、API 限流），实现指数退避重试。（4）**结果截断**：限制工具返回结果的大小，如 Nanobot 的 `_TOOL_RESULT_MAX_CHARS = 16000`，防止超大结果撑爆上下文。（5）**错误包装**：将工具错误信息以结构化方式返回给模型，使模型能据此调整策略。（6）**沙箱隔离**：将危险操作（如代码执行）放在沙箱环境中运行，防止系统损坏。
+**答案：** 保证工具调用可靠性需要多层防护：（1）**输入验证**：通过 JSON Schema 定义工具参数的类型和约束，在调用前验证参数合法性。Nanobot 的 ToolRegistry 就使用 `input_schema` 字段定义参数规范。（2）**超时控制**：为每个工具调用设置合理的超时时间，避免单个工具阻塞整个 Agent 循环。（3）**重试机制**：对于可重试的错误（如网络超时、API 限流），实现指数退避重试。（4）**结果治理**：限制工具返回结果的大小，必要时截断、摘要或 spill；Nanobot current-source 通过可配置的 `maxToolResultChars` 等机制避免超大 Observation 撑爆上下文。（5）**错误包装**：将工具错误信息以结构化方式返回给模型，使模型能据此调整策略。（6）**沙箱隔离**：将危险操作（如代码执行）放在沙箱环境中运行，防止系统损坏。
 
 **面试加分点：** 提到 Nanobot 中当工具调用失败时，错误信息会被包装为 `tool_result` 返回给模型，让模型自行决定是重试还是换一种方式。
 
@@ -152,9 +153,9 @@ Nanobot current-source 的对应机制包括：
 
 ### Q14. Agent 系统中如何处理长任务（Long-horizon Tasks）？
 
-**答案：** 长任务处理是 Agent 的核心难点之一。主要策略有：（1）**分层规划**：将长任务分解为高层计划和低层执行步骤，高层计划相对稳定，低层步骤可以灵活调整。（2）**检查点机制（Checkpointing）**：定期保存中间状态，失败时可以从检查点恢复而非从头开始。（3）**记忆压缩**：使用摘要技术压缩历史交互记录，保留关键信息而丢弃冗余细节。Nanobot 的 MemoryConsolidator 就是这种机制的实现。（4）**子任务委托**：通过 Orchestrator-Workers 模式将子任务委托给独立的 Agent，每个子 Agent 只需关注局部上下文。（5）**进度跟踪**：维护一个显式的任务进度列表，帮助 Agent 知道「已完成什么」和「还需要做什么」。
+**答案：** 长任务处理是 Agent 的核心难点之一。主要策略有：（1）**分层规划**：将长任务分解为高层计划和低层执行步骤，高层计划相对稳定，低层步骤可以灵活调整。（2）**检查点机制（Checkpointing）**：定期保存中间状态，失败时可以从检查点恢复而非从头开始。（3）**记忆压缩**：使用摘要技术压缩历史交互记录，保留关键信息而丢弃冗余细节。Nanobot current-source 中由 `AutoCompact` + `Consolidator` 完成 Session 压缩/归档，并通过 Dream 维护长期 durable memory。（4）**子任务委托**：通过 Orchestrator-Workers 模式将子任务委托给独立的 Agent，每个子 Agent 只需关注局部上下文。（5）**进度跟踪**：维护一个显式的任务进度列表，帮助 Agent 知道「已完成什么」和「还需要做什么」。
 
-**面试加分点：** 提到 Nanobot 中 `save_memory` 虚拟工具允许 Agent 主动将重要信息持久化，这是处理长任务时的关键能力。
+**面试加分点：** current-source 不再以旧版 `save_memory` 虚拟工具作为长期记忆主路径；应回答 Session checkpoint/recovery、AutoCompact/Consolidator、`memory/history.jsonl` 与 Dream 分层处理长任务和长期记忆。
 
 ---
 
@@ -1338,7 +1339,7 @@ Long-term Memory 只保留跨 Session 稳定信息。
 
 ### Q134. 如何文档化一个 Agent 项目？
 
-**答案：** Agent 项目的文档需要比传统软件更详细，因为 Agent 的行为更难预测：（1）**架构文档**：包含系统架构图、组件交互关系、数据流向。标注 AgentLoop、ToolRegistry、MemoryConsolidator 等核心组件的职责和接口。（2）**Prompt 文档**：记录每个 system prompt 的设计意图、关键指令的作用、修改历史。Prompt 的每次变更都应该记录原因和预期效果。（3）**工具文档**：每个工具的名称、功能描述、参数说明、返回值格式、使用示例、已知限制。Nanobot 的工具在 ToolRegistry 中已经有 JSON Schema 格式的参数文档。（4）**部署文档**：环境要求、配置项说明、部署步骤、常见问题排查。（5）**运维手册（Runbook）**：常见告警的处理流程、回滚步骤、紧急联系人。（6）**评测报告**：Agent 在各项基准上的表现数据，作为后续优化的基准线。（7）**变更日志（Changelog）**：记录每个版本的功能变更、bug 修复和已知问题。
+**答案：** Agent 项目的文档需要比传统软件更详细，因为 Agent 的行为更难预测：（1）**架构文档**：包含系统架构图、组件交互关系、数据流向。标注 AgentLoop、AgentRunner、ToolRegistry、SessionManager、Consolidator/Dream 等核心组件的职责和接口。（2）**Prompt 文档**：记录每个 system prompt 的设计意图、关键指令的作用、修改历史。Prompt 的每次变更都应该记录原因和预期效果。（3）**工具文档**：每个工具的名称、功能描述、参数说明、返回值格式、使用示例、已知限制。Nanobot 的工具在 ToolRegistry 中已经有 JSON Schema 格式的参数文档。（4）**部署文档**：环境要求、配置项说明、部署步骤、常见问题排查。（5）**运维手册（Runbook）**：常见告警的处理流程、回滚步骤、紧急联系人。（6）**评测报告**：Agent 在各项基准上的表现数据，作为后续优化的基准线。（7）**变更日志（Changelog）**：记录每个版本的功能变更、bug 修复和已知问题。
 
 **面试加分点：** 展示本项目（learn-nanobot）的文档结构——从架构解析到面试准备，12 个章节的系统化组织就是一个优秀的文档化案例。
 
