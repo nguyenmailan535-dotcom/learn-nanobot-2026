@@ -39,23 +39,23 @@
 
 ### 6.2.1 系统要求
 
-以 2026-09-24 current-source README 为准：
+2026-09-24 current-source 建议：
 
-| 项目 | 要求 |
-|---|---|
-| Python | **3.11+** |
-| 操作系统 | macOS / Linux / Windows |
-| Git | Source install 需要 |
-| Bun | Source checkout 的前端/TUI开发流程需要；发布 wheel 已包含 WebUI |
-| LLM Credential | 至少一个可用 Provider/Model |
+- Python **3.11+**
+- Git
+- 一个可用的 LLM Provider Credential
+- 如果参与 WebUI/TUI 源码开发，再准备 current repo 对应的 Bun/前端环境
+
+检查：
 
 ```powershell
 python --version
 git --version
-bun --version
 ```
 
-### 6.2.2 Python 环境配置
+> 原版教程中的“Python 3.10.x 或更高”已经不再作为 current-source 基线，本课程统一按 Python 3.11+。
+
+### 6.2.2 为什么要建独立虚拟环境
 
 ```powershell
 python -m venv .venv
@@ -63,302 +63,214 @@ python -m venv .venv
 python -m pip install -U pip
 ```
 
-Linux/macOS：
+源码学习时不要把实验依赖装进系统 Python。
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-```
+### 6.2.3 LLM API Key
 
-### 6.2.3 LLM API Key 准备
+可以使用官方支持的 Provider 或任意兼容路径。重点是：
 
-Credential 建议放环境变量。current `config.json` 的字符串值支持 `${VAR_NAME}`：
+- Credential 放环境变量或受保护的配置
+- 不写进 Git
+- 不写进 AGENTS/SKILL
+- 不把 Secret 放 MCP command args
 
-```json
-{
-  "providers": {
-    "groq": {
-      "apiKey": "${GROQ_API_KEY}"
-    }
-  }
-}
-```
-
-启动时会在内存中解析，解析后的 Secret 不会写回配置文件。
+---
 
 ## 6.3 安装 Nanobot
 
-### 6.3.1 方式一：pip 安装（通用）
+### 6.3.1 学 current-source：推荐 Editable Install
 
-```bash
-python -m pip install nanobot-ai
-nanobot --version
-```
-
-### 6.3.2 方式二：uv 工具安装
-
-```bash
-uv tool install nanobot-ai
-nanobot --version
-```
-
-### 6.3.3 方式三：从源码安装（本教程推荐）
-
-本教程学习的是 2026-09-24 的 current-source：
-
-```bash
+```powershell
 git clone https://github.com/HKUDS/nanobot.git
 cd nanobot
 python -m venv .venv
-# Windows:
 .\.venv\Scripts\Activate.ps1
-# Linux/macOS:
-# source .venv/bin/activate
-python -m pip install -U pip
 python -m pip install -e .
 ```
 
-editable install 让 checkout 中源码修改直接被当前环境使用，适合下断点和跑测试。
+Editable Install 的价值：
 
-### 6.3.4 安装后验证
+```
+本地源码修改
+→ 当前 Python 环境立即使用
+→ 可以下断点 / 跑 Test / Source Trace
+```
 
-```bash
+### 6.3.2 Stable Package
+
+如果只是日常使用，可以安装发布版本；但本课程涉及 `main` 源码，因此所有源码结论都以学习快照为准，不保证与旧 stable wheel 完全一致。
+
+### 6.3.3 验证
+
+```powershell
 nanobot --version
 nanobot status
-nanobot --help
 git rev-parse HEAD
 ```
 
-遇到教程与行为不一致，先比较版本和 commit。
+建议把 version + commit SHA 写进学习笔记。
+
+---
 
 ## 6.4 配置向导 nanobot onboard
 
-### 6.4.1 运行配置向导
+### 6.4.1 首次配置
 
-current-source 仍支持：
+current-source 可以使用：
 
-```bash
+```powershell
 nanobot onboard --wizard
 ```
 
-本地桌面首次使用也可以直接：
+也可以通过 WebUI Settings 完成 Provider、Model、Channel、MCP 等配置。
 
-```bash
-nanobot webui
+### 6.4.2 current 默认路径
+
 ```
-
-然后在 **Settings → Models** 配置首个 Provider / Model。
-
-### 6.4.2 向导流程详解
-
-核心是生成或更新：
-
-```text
 ~/.nanobot/config.json
-```
-
-通常需要确定 Provider、Model/Model Preset、Credential、Workspace，以及可选的 Channel/MCP/Security 配置。
-
-### 6.4.3 向导生成的文件
-
-默认 Agent Workspace：
-
-```text
 ~/.nanobot/workspace/
-├── AGENTS.md
-├── SOUL.md
-├── USER.md
-├── HEARTBEAT.md
-├── memory/
-├── skills/
-├── plugins/
-└── cron/
+~/.nanobot/sessions/<workspace-id>/
 ```
 
-Session 默认在 Runtime data directory 的：
+不要再把“当前工作目录下的 my-agent/config.json + sessions/”当成唯一模式。
 
-```text
-sessions/<workspace-id>/*.jsonl
+### 6.4.3 为什么要先跑 status
+
+```powershell
+nanobot status
 ```
 
-而不是简单放在 Workspace 根目录。
+确认：
+
+- 实际读取哪个 config
+- 实际 Agent Workspace
+- 当前 model/provider
+
+很多“我改了配置但没生效”的问题，本质是改错实例。
+
+---
 
 ## 6.5 config.json 配置详解
 
-### 6.5.1 current 配置结构
+current schema 主要位于：
 
-current-source 使用 **JSON + Pydantic Schema**。主要区域：
-
-```text
-agents.defaults
-modelPresets
-providers
-channels
-tools
-gateway
-transcription
+```
+nanobot/config/schema.py
+nanobot/config/loader.py
+nanobot/config/paths.py
 ```
 
-简化示例：
+常见区域：
 
 ```json
 {
   "agents": {
-    "defaults": {
-      "workspace": "~/.nanobot/workspace",
-      "modelPreset": "primary"
-    }
+    "defaults": {}
   },
-  "providers": {
-    "groq": {
-      "apiKey": "${GROQ_API_KEY}"
-    }
-  },
-  "modelPresets": {
-    "primary": {
-      "provider": "groq",
-      "model": "YOUR_MODEL"
-    }
-  },
-  "tools": {
-    "restrictToWorkspace": true
-  }
+  "providers": {},
+  "modelPresets": {},
+  "tools": {},
+  "channels": {},
+  "gateway": {}
 }
 ```
 
-具体 Provider/Model 名以当前 catalog 和账号为准。
+### 6.5.1 CamelCase 与兼容
 
-### 6.5.2 agents.defaults 字段详解
+schema 能兼容部分 snake_case / legacy 字段，但 current 保存配置时以 camelCase aliases 为主。
 
-current snapshot 中值得记住：
+例如 current 安全字段：
 
-| 字段 | 默认值/含义 |
-|---|---|
-| `contextWindowTokens` | 200000 |
-| `temperature` | 0.1 |
-| `maxToolIterations` | 200 |
-| `maxConcurrentSubagents` | 4 |
-| `maxToolResultChars` | 16000 |
-| `providerRetryMode` | standard |
-| `idleCompactAfterMinutes` | 15 分钟 |
-| `idleCompactCheckIntervalSeconds` | 60 秒 |
-| `unifiedSession` | 是否跨 Channel 共用 Session |
-| `disabledSkills` | 禁用 Skill |
-| `dream` | Dream 长期记忆配置 |
-
-### 6.5.3 providers 配置
-
-Provider Credential 与 `modelPresets` 分离，使一个 Provider 可服务多个模型配置，并允许 Session 选择不同 Preset。
-
-### 6.5.4 channels 配置
-
-生产使用除 Token/Secret 外，还要关注 `allowFrom` / pairing、group policy、streaming 等访问控制。
-
-### 6.5.5 tools 配置
-
-重点字段：
-
-```text
+```
 tools.restrictToWorkspace
-tools.exec.enable
 tools.exec.sandbox
 tools.ssrfWhitelist
-tools.mcpServers
-tools.web
 ```
 
-MCP 示例：
+loader 还会迁移旧配置，例如旧：
 
-```json
-{
-  "tools": {
-    "mcpServers": {
-      "filesystem": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/safe/path"],
-        "enabledTools": ["read_file"]
-      }
-    }
-  }
-}
+```
+tools.exec.restrictToWorkspace
 ```
 
-### 6.5.6 配置文件查找与环境变量
+迁移到：
 
-默认配置是 `~/.nanobot/config.json`。字符串值可使用 `${VAR_NAME}`；缺失变量会 fail fast 并指出具体字段。
+```
+tools.restrictToWorkspace
+```
 
-多实例使用不同 Config / Workspace / Port，参见 current `docs/multiple-instances.md`。
+### 6.5.2 MCP
+
+current MCP 配置位于：
+
+```
+tools.mcpServers.<name>
+```
+
+也可以通过 WebUI Apps/MCP 管理。
+
+### 6.5.3 Model Preset
+
+current-source 不建议只理解为“全局固定 provider/model”；还支持 model presets 与 Session 级 model selection。
+
+---
 
 ## 6.6 第一次运行：交互模式
 
-### 6.6.1 启动 Agent
+### 6.6.1 One-shot Smoke Test
 
-Native Terminal：
-
-```bash
-nanobot
-```
-
-兼容形式：
-
-```bash
-nanobot agent
-```
-
-One-shot：
-
-```bash
+```powershell
 nanobot agent -m "Reply only with setup-ok"
 ```
 
-WebUI：
+### 6.6.2 Terminal Agent
 
-```bash
+```powershell
+nanobot agent
+```
+
+### 6.6.3 WebUI
+
+```powershell
 nanobot webui
 ```
 
-长期 Gateway：
+### 6.6.4 Gateway
 
-```bash
-nanobot gateway --background
-nanobot gateway status
-nanobot gateway logs
-nanobot gateway restart
-nanobot gateway stop
+```powershell
+nanobot gateway
 ```
 
-### 6.6.2 交互界面
+Gateway 是长期运行入口，会承载 enabled chat channels、WebSocket/WebUI、Cron、Dream、Heartbeat 等系统任务。
 
-WebUI 还提供 persistent topics、temporary chats、Workspace、Models、Apps/MCP、Skills、Automations 与 Settings。
+### 6.6.5 OpenAI-compatible API
 
-### 6.6.3 常用交互命令
-
-以 current `docs/chat-commands.md` 为准。源码学习建议重点试：
-
-```text
-/model
-/skill
-/compact
-/dream
-/dream-log
-/trigger
-/pairing
+```powershell
+nanobot serve
 ```
 
-### 6.6.4 观察 Agent 的行为
+### 6.6.6 第一次观察文件
 
-至少观察：
+current ownership：
 
-```text
-Session JSONL
-Tool Call / Tool Result
-Turn Stage Log
-effective Workspace
-selected Model / Preset
+```
+~/.nanobot/
+├── config.json
+├── sessions/
+│   └── <workspace-id>/
+└── workspace/
+    ├── AGENTS.md
+    ├── SOUL.md
+    ├── USER.md
+    ├── memory/
+    │   ├── MEMORY.md
+    │   └── history.jsonl
+    ├── skills/
+    ├── plugins/
+    └── cron/
 ```
 
-打开 verbose Gateway 时，还能观察 Channel/MCP 的启动和 Tool Registration。
+`HISTORY.md` 只应视为 legacy migration，而不是新安装后的长期历史主文件。
 
 ## 6.7 自定义 AGENTS.md：定义 Agent 身份
 
@@ -434,151 +346,117 @@ System Prompt 构建过程：
 
 ## 6.8 引导文件体系
 
-### 6.8.1 SOUL.md —— 全局人格
-
-`SOUL.md` 属于 Agent Workspace，是 current `ContextBuilder.BOOTSTRAP_FILES` 之一。适合保存稳定人格、沟通风格、长期行为规则；Dream 可以更新它。
-
-### 6.8.2 USER.md —— 用户画像
-
-`USER.md` 记录跨 Session 稳定的用户信息和偏好，也属于 Agent Workspace。
-
-### 6.8.3 TOOLS.md —— current-source 中不再是固定 Bootstrap
-
-旧教程把 `TOOLS.md` 当作固定引导文件。current-source 的定义是：
+current ContextBuilder 的 bootstrap files：
 
 ```python
 BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md"]
 ```
 
-Tool 能力主要来自 ToolLoader/ToolRegistry、Tool Schema、Skills、MCP 和 Agent Plugins。
+### 6.8.1 AGENTS.md
 
-如果自行创建 `TOOLS.md`，不要假设它会自动进入每轮 Context，除非通过其他机制显式加载。
+用于 Agent / Project Instructions。current-source 还区分：
 
-### 6.8.4 文件优先级与覆盖关系
+- Agent Workspace 的 Agent-owned state
+- Effective Project Workspace 的 Project AGENTS.md
 
-current-source 还区分 Agent Workspace 与 Effective Project Workspace：
+### 6.8.2 SOUL.md
 
-| 状态 | Owner |
+长期人格、行为风格、价值取向。Dream 可以维护它。
+
+### 6.8.3 USER.md
+
+稳定用户画像与长期偏好。Dream 可以维护它。
+
+### 6.8.4 MEMORY.md
+
+位于：
+
+```
+<agent-workspace>/memory/MEMORY.md
+```
+
+用于 long-term durable facts。
+
+### 6.8.5 history.jsonl
+
+位于：
+
+```
+<agent-workspace>/memory/history.jsonl
+```
+
+它是 Consolidation/Dream 的历史来源，不是每轮都全部塞进 Prompt。
+
+### 6.8.6 Agent Workspace vs Project Workspace
+
+| 内容 | Owner |
 |---|---|
-| SOUL.md / USER.md / memory/ | Agent Workspace |
-| Workspace Skills / Plugins | Agent Workspace |
-| Project AGENTS.md | Project Workspace |
-| 相对文件路径 / Shell cwd | Project Workspace |
-| Session JSONL | Runtime data directory / workspace namespace |
-
-这是多 Project 场景下理解 Context 与文件权限的基础。
+| SOUL / USER / MEMORY | Agent Workspace |
+| Custom Skills / Plugins | Agent Workspace |
+| Project AGENTS.md | Effective Project |
+| Relative File Tool Path | Effective Project |
+| Shell Working Directory | Effective Project |
 
 ## 6.9 常见问题排错
 
-### 6.9.1 安装问题
+### 问题 1：nanobot 命令找不到
 
-**问题 1：`nanobot: command not found`**
-
-```bash
-# 原因：安装路径不在 PATH 中
-# 解决方案 1：检查 pip 安装路径
-pip show nanobot-ai | grep Location
-
-# 解决方案 2：使用 python -m
-python -m nanobot
-
-# 解决方案 3：使用 uv 重新安装
-uv tool install nanobot-ai
+```powershell
+Get-Command python
+Get-Command nanobot
 ```
 
-**问题 2：Python 版本不兼容**
+确认 terminal 使用正确 venv。
 
-```bash
-# 报错：requires Python >= 3.10
-# 解决：升级 Python
-pyenv install 3.12.0
-pyenv global 3.12.0
+### 问题 2：源码改了没生效
 
-# 或使用 conda
-conda create -n nanobot python=3.12 -y
+确认使用：
+
+```
+pip install -e .
 ```
 
-**问题 3：依赖冲突**
+并记录 `git rev-parse HEAD`。
 
-```bash
-# 使用虚拟环境隔离
-python -m venv nanobot-env
-source nanobot-env/bin/activate
-pip install nanobot-ai
+### 问题 3：配置改了没生效
+
+先执行：
+
+```powershell
+nanobot status
 ```
 
-### 6.9.2 配置问题
+确认 active config path。
 
-**问题 4：API Key 无效**
+### 问题 4：文件访问被拒
 
-```bash
-# 报错：Authentication failed / Invalid API key
-# 排查步骤：
-# 1. 确认 key 是否正确复制（无多余空格）
-# 2. 确认 provider 与 key 匹配
-# 3. 测试 key 是否有效
-curl https://api.openai.com/v1/models \
-  -H "Authorization: Bearer sk-xxx"
+优先检查：
+
+- Effective Project Workspace
+- `tools.restrictToWorkspace`
+- `tools.exec.sandbox`
+
+不要第一反应关闭安全边界。
+
+### 问题 5：WebUI 可以打开，但 Chat App 不工作
+
+Chat Apps 要由 Gateway 长期运行；使用：
+
+```powershell
+nanobot channels status
+nanobot gateway --verbose
 ```
 
-**问题 5：模型不存在**
+排查 channel config、optional plugin、pairing/allowFrom。
 
-```bash
-# 报错：Model not found
-# 原因：model 字段与 provider 不匹配
-# 例如：provider 设置为 deepseek，但 model 设置为 gpt-4o
+### 问题 6：教程与本机行为不同
 
-# 正确配置：
-# provider: "deepseek" → model: "deepseek-chat"
-# provider: "openai"   → model: "gpt-4o"
+本仓库以 2026-09-24 current-source 为基线。先比较：
+
 ```
-
-**问题 6：连接超时**
-
-```bash
-# 国内用户常见问题
-# 解决方案 1：使用代理
-export https_proxy=http://127.0.0.1:7890
-
-# 解决方案 2：使用国内 Provider
-# 配置 DeepSeek 或其他国内模型服务
-
-# 解决方案 3：使用 api_base 指向代理地址
-{
-  "providers": {
-    "openai": {
-      "api_key": "sk-xxx",
-      "api_base": "https://your-proxy.example.com/v1"
-    }
-  }
-}
+nanobot --version
+git rev-parse HEAD
 ```
-
-### 6.9.3 运行时问题
-
-**问题 7：记忆文件找不到**
-
-```bash
-# 确认 workspace 配置是否正确
-cat config.json | python -m json.tool | grep workspace
-
-# 手动创建记忆目录
-mkdir -p memory
-```
-
-**问题 8：工具调用失败**
-
-```bash
-# 常见原因：
-# 1. restrict_to_workspace 限制了文件访问范围
-# 2. exec 工具被禁用
-# 3. web_search 没有配置 API Key
-
-# 检查工具配置
-cat config.json | python -m json.tool | grep -A 5 tools
-```
-
----
 
 ## 6.10 实战练习
 
@@ -730,4 +608,4 @@ nanobot
 
 ---
 
-> **下一章**：[07 - 记忆系统实战](../07-memory-and-dream/README.md) —— 深入理解 Nanobot 的双层记忆架构
+> **下一章**：[07 - 记忆系统实战](../07-memory-system/README.md) —— 深入理解 Nanobot 的双层记忆架构
