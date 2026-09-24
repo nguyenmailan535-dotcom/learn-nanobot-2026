@@ -543,69 +543,32 @@ nanobot
 
 ## 6.11 面试话术
 
-### 话术 1：描述你如何搭建 Nanobot 环境
+### 话术 1：描述你如何搭建 current-source
 
-> **面试官**：你有使用过 AI Agent 框架吗？能描述一下搭建过程吗？
->
-> **参考回答**：
->
-> "有的，我深入学习并使用过 HKUDS/nanobot 框架。搭建过程主要分几步：
->
-> 首先是环境准备，Nanobot 要求 Python 3.10 以上，我用的是 uv 来安装，因为它比 pip 快很多。安装命令是 `uv tool install nanobot-ai`，这样会创建独立的虚拟环境，不污染全局。
->
-> 然后运行 `nanobot onboard` 进行交互式配置，主要是选择 LLM Provider、填入 API Key、选择默认模型。它会生成一个 config.json 文件。
->
-> 配置文件里有几个关键参数我特别关注：`context_window_tokens` 控制上下文窗口大小，直接影响记忆压缩的触发时机；`max_tool_iterations` 限制了单次对话中工具调用次数，防止 Agent 陷入死循环。
->
-> 最后通过 AGENTS.md 定义 Agent 的身份和行为规范，就可以运行 `nanobot` 启动交互模式了。整个过程大概 10 分钟就能跑起来一个可用的 Agent。"
+> “我学习的是 Nanobot main，所以不是只安装旧 stable 包。我先 clone 仓库，用 Python 3.11+ 建独立 venv，再 `pip install -e .` 做 editable install；随后用 `nanobot onboard --wizard` 或 WebUI 配 Provider，并用 `nanobot status` 确认实际 config/workspace/model。最后分别用 one-shot CLI、Terminal Agent 和 WebUI 做 Smoke Test，并记录 `git rev-parse HEAD` 保证源码结论可复现。”
 
-### 话术 2：配置文件的设计理念
+### 话术 2：Config、Workspace、Session 怎么区分？
 
-> **面试官**：你觉得 Nanobot 的配置设计有什么特点？
->
-> **参考回答**：
->
-> "Nanobot 的配置设计体现了 **Markdown 即配置** 的理念，这是它区别于其他框架的一大特色。
->
-> 具体来说，它用 JSON 文件管理技术配置（API Key、模型参数等），用 Markdown 文件管理行为配置（Agent 身份、用户画像、使用规范等）。这种分离很优雅：JSON 给机器读，Markdown 给人和 AI 读。
->
-> 特别值得一提的是它的引导文件体系——SOUL.md 定义人格、AGENTS.md 定义身份、USER.md 定义用户画像、TOOLS.md 定义工具规范——这四个文件共同构建了一个层次清晰的 System Prompt。这种设计让非技术人员也能通过修改 Markdown 来定制 Agent 行为，大大降低了使用门槛。"
+> “Config 默认在 `~/.nanobot/config.json`，描述 Provider、Model、Tool、Channel 和 Gateway；Agent Workspace 保存 SOUL/USER/Memory/Skills/Plugins；Session Store 位于 config data directory 下，保存 conversation/runtime state；WebUI 还可以选择 Effective Project Workspace，文件和 Shell 的相对路径跟 Project 走，但 Agent Memory 仍属于 Agent Workspace。”
 
-### 话术 3：遇到的问题和解决方案
+### 话术 3：遇到文件访问失败怎么排查？
 
-> **面试官**：搭建过程中遇到过什么问题吗？
->
-> **参考回答**：
->
-> "遇到过几个典型问题。一个是 API 连接超时，因为在国内直连 OpenAI API 不稳定，我的解决方案是在 config.json 的 providers 里把 api_base 改为代理地址，也可以直接换用 DeepSeek 这样的国内 Provider。
->
-> 另一个是 context_window_tokens 的设置问题。一开始我设得比较大，结果发现记忆压缩一直不触发，对话越来越长导致 API 费用很高。后来理解了这个参数的作用——当 `estimate_prompt_tokens_chain` 超过这个值时才会触发 MemoryConsolidator——就把它调到了一个合理的范围。
->
-> 还有一个工具调用权限的问题，默认的 `restrict_to_workspace` 配置会限制 Agent 只能操作 workspace 内的文件，一开始没理解，尝试让 Agent 操作外部文件时总是失败。理解了这个安全机制后，我反而觉得这是一个很好的设计。"
+> “先确认 effective project workspace，再看 `tools.restrictToWorkspace` 和 `tools.exec.sandbox`。我不会为了调通直接关闭安全边界，而是先判断请求是否越出了当前 Project Scope。”
 
 ---
 
 ## 6.12 本章小结
 
-### 核心知识点回顾
+| 知识点 | current-source 要点 |
+|---|---|
+| Python | 3.11+ |
+| 源码安装 | 推荐 editable install：`pip install -e .` |
+| 配置 | `~/.nanobot/config.json` |
+| Agent Workspace | `~/.nanobot/workspace/` |
+| Session | `<config-dir>/sessions/<workspace-id>/` |
+| Bootstrap | AGENTS.md / SOUL.md / USER.md |
+| Long-term History | `memory/history.jsonl`，不是旧 HISTORY.md 主路径 |
+| Runtime 入口 | agent / webui / gateway / serve |
+| 安全 | `tools.restrictToWorkspace` + 可选 exec sandbox |
 
-| 知识点 | 要点 |
-|--------|------|
-| 安装方式 | pip install / uv tool install / 源码安装 |
-| 配置向导 | `nanobot onboard` 交互式生成 config.json |
-| 核心配置 | agents.defaults / providers / channels / tools |
-| 关键参数 | context_window_tokens, max_tool_iterations |
-| 引导文件 | SOUL.md → AGENTS.md → USER.md → TOOLS.md |
-| 运行模式 | `nanobot` 直接进入交互模式 |
-
-### 面试核心要点
-
-1. **安装方式**：推荐 uv，解释 uv 的优势
-2. **配置设计**：JSON + Markdown 双配置体系
-3. **关键参数**：context_window_tokens 与记忆压缩的关系
-4. **引导文件**：四层引导体系的设计理念
-5. **实际经验**：能描述具体问题和解决方案
-
----
-
-> **下一章**：[07 - 记忆系统实战](../07-memory-system/README.md) —— 深入理解 Nanobot 的双层记忆架构
+真正的完成标准不是“命令跑起来”，而是你能指出当前实例实际使用的 Config、Workspace、Project Scope 和 Session Store，并知道它们为什么分开。
