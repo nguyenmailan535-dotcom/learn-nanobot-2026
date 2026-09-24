@@ -624,4 +624,4 @@ Channel
 
 ---
 
-> 📝 **本章小结**：通过逐文件解读，我们看到 Nanobot 的 早期约 4000 行、current-source 已显著扩展代码如何构建出一个完整的 Agent 框架。核心是 10 个文件、10 个类，每个类职责清晰。掌握这些源码细节，你就能在面试中自信地说"我通读了全部源码"，并能深入讨论任何实现细节。
+> 📝 **本章小结**：current-source 已远超早期“10 个核心文件”的规模。真正的完成标准不是声称“通读全部源码”，而是能把一条真实 Turn 从 InboundMessage → Session admission → TurnContext → AgentRunSpec → AgentRunner → ToolRegistry → Persistence / Delivery 跟到底，并能用断点、日志或测试验证每一跳。
