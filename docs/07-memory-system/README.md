@@ -19,7 +19,7 @@
 - [7.3 Nanobot 双层记忆架构](#73-nanobot-双层记忆架构)
 - [7.4 MEMORY.md —— 长期记忆](#74-memorymd--长期记忆)
 - [7.5 memory/history.jsonl —— 历史时间线](#75-historymd--历史时间线)
-- [7.6 Consolidator 压缩机制](#76-memoryconsolidator-压缩机制)
+- [7.6 Consolidator / AutoCompact 压缩机制](#76-consolidator--autocompact-压缩机制)
 - [7.7 短期记忆：Session 会话历史](#77-短期记忆session-会话历史)
 - [7.8 记忆系统完整数据流](#78-记忆系统完整数据流)
 - [7.9 记忆系统与其他框架对比](#79-记忆系统与其他框架对比)
