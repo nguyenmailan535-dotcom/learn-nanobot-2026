@@ -39,19 +39,28 @@
 
 ### Q3. Agent 的规划（Planning）模块通常有哪些实现方式？
 
-**答案：** 规划模块是 Agent 拆解复杂任务为可执行步骤的核心能力，主要有以下实现方式：（1）**任务分解（Task Decomposition）**：如 Chain-of-Thought 逐步推理，或 Tree-of-Thought 多路径探索；（2）**子目标拆分**：将大任务分解为有依赖关系的子目标，如 HuggingGPT 先规划工具调用链再逐一执行；（3）**Reflection/自我纠错**：如 Reflexion 框架，在执行失败后反思原因并修改计划；（4）**外部规划器**：使用经典 AI 规划算法（如 PDDL）或代码生成来制定计划；（5）**Orchestrator-Workers 模式**：主 Agent 负责规划和分配，子 Agent 负责执行具体步骤。Nanobot 中 SubagentManager 就是 Orchestrator-Workers 模式的实现。
+**答案：** 常见方式包括：（1）**ReAct**：模型在 Observation 反馈下动态决定下一步；（2）**Plan-and-Execute**：先生成较高层计划，再逐步执行；（3）**显式 Workflow / Graph**：开发者预先限定状态转移；（4）**Orchestrator-Workers**：主 Agent 分解任务，Worker/Subagent 执行可并行子任务；（5）**混合模式**：确定性外层 Workflow + 局部 Agent 决策。
 
-**面试加分点：** 能提到 Planning 目前最大的痛点是长期规划的可靠性不足，以及 Agent 容易陷入「死循环」的问题，这也是 Nanobot 设置 15 次迭代上限的原因。
-
----
+**面试加分点：** Planning 的难点不是“有没有计划文本”，而是长期计划可靠性、动态环境下的重规划、Tool Failure 与资源失控。工程上通过 configurable iteration budget、timeout、Tool Permission、Checkpoint 等硬约束治理，不应背某个旧版本固定“15 次”上限。
 
 ### Q4. Agent 的记忆系统分为哪几种？各自的作用是什么？
 
-**答案：** Agent 记忆系统通常分为三层：（1）**短期记忆（Working Memory）**：即当前会话的上下文窗口，包括用户消息、工具调用结果等。受限于模型的 context window 长度（如 128K tokens），是最直接但容量有限的记忆形式。（2）**长期记忆（Long-term Memory）**：跨会话持久化的信息，如用户偏好、历史决策、项目知识等，通常通过向量数据库或文件系统实现。Nanobot 的 MemoryConsolidator 就负责将短期记忆压缩写入 `~/.nanobot/memory/` 目录。（3）**外部知识库（External Knowledge）**：通过 RAG 检索的文档、数据库、API 等外部数据源，本质是可按需加载的「参考资料」。三者协同工作：短期记忆保证连贯性，长期记忆保证个性化，外部知识保证准确性。
+**答案：** 一般可以分为：（1）**Working Context**：当前模型调用实际看到的消息；（2）**Session / Conversation State**：为了多轮恢复而持久化的结构化对话状态；（3）**Long-term Memory**：跨 Session 保留的稳定事实/偏好；（4）**External Knowledge**：通过 RAG、数据库、API 等按需获取的知识。
 
-**面试加分点：** 可以将这三层类比为人类的「工作记忆」「海马体长期记忆」和「图书馆查阅」，面试官会觉得你理解深刻。
+以 Nanobot current-source 为例：
 
----
+~~~text
+Session JSONL
+→ AutoCompact / Consolidator
+→ memory/history.jsonl
+→ Dream
+→ SOUL.md / USER.md / memory/MEMORY.md
+→ ContextBuilder
+~~~
+
+所以不要再把它回答成旧版“MemoryConsolidator 直接把短期记忆写到某个 ~/.nanobot/memory 目录”或简单的 MEMORY.md/HISTORY.md 双文件。
+
+**面试加分点：** Session 是 Runtime Replay，Long-term Memory 是 Curated Knowledge，External Knowledge 是 Retrieval Source；这三种状态生命周期不同。
 
 ### Q5. 什么是工具调用（Tool Calling）？它在 Agent 中的作用是什么？
 
@@ -95,19 +104,35 @@
 
 ### Q10. 请解释 Orchestrator-Workers 模式
 
-**答案：** Orchestrator-Workers 是一种多 Agent 协作模式，由一个「编排器（Orchestrator）」Agent 负责任务分解和分配，多个「工人（Worker）」Agent 负责执行具体子任务。工作流程为：用户请求 → Orchestrator 分析任务并拆解为子任务 → 将子任务分发给不同 Worker → Worker 各自执行并返回结果 → Orchestrator 汇总结果并返回给用户。Nanobot 的 SubagentManager 就是这种模式的实现：主 Agent 通过 `Task` 工具启动子 Agent，每个子 Agent 有独立的 AgentLoop 和上下文，执行完毕后将结果返回主 Agent。关键设计考虑包括：子任务的粒度划分、结果的合并策略、失败子任务的重试机制、以及防止递归嵌套过深（Nanobot 限制 15 次迭代）。
+**答案：** Orchestrator-Workers 模式由主执行者负责拆分/委派任务，多个 Worker 处理相对独立的子任务，再将结果汇总。它适合搜索、分析、批量处理等可以扇出执行的工作。
 
-**面试加分点：** 对比 Orchestrator-Workers 与「流水线（Pipeline）」模式的差异——前者是并行扇出再汇总，后者是串行传递。
+Nanobot current-source 中，主 Agent 可通过 Spawn Tool 交给 `SubagentManager`；Subagent 构造 focused prompt、scoped tools、runtime/workspace，并**复用 AgentRunner / AgentRunSpec** 执行，而不是再复制一个完整 Chat AgentLoop。后台结果可以重新注入主 Session。
 
----
+关键治理包括：
+
+- `maxConcurrentSubagents`
+- configurable max iterations
+- scoped Tool Registry
+- cancellation / task status
+- result injection / terminal wait
+
+**面试加分点：** Orchestrator-Workers 不是默认比单 Agent 好；只有子任务足够独立、并行收益大于协调成本时才值得使用。
 
 ### Q11. Agent 系统中的状态管理有哪些挑战？
 
-**答案：** Agent 状态管理的核心挑战包括：（1）**上下文膨胀**：随着对话轮次增加和工具调用累积，上下文 token 数持续增长，可能超出模型窗口限制。解决方案包括对话压缩（如 Nanobot 的 MemoryConsolidator）、滑动窗口、摘要替换等。（2）**状态一致性**：多个工具调用可能修改共享状态（如文件系统），需要保证操作的原子性和一致性。Nanobot 使用 `session_locks` 和 `_concurrency_gate(3)` 来控制并发。（3）**持久化与恢复**：Agent 可能被中断后恢复，需要保存足够的状态信息。（4）**多 Agent 状态同步**：在多 Agent 架构中，不同 Agent 之间的状态共享和隔离需要精心设计。（5）**幂等性**：相同的工具调用应该产生相同的结果，避免副作用累积。
+**答案：** 主要包括：（1）**Context 膨胀**：历史与 Tool Result 持续增长；（2）**并发一致性**：同一 Session 同时写状态会产生顺序和覆盖问题；（3）**持久化与恢复**：长 Turn 中断后要知道哪些输入/Tool 已经提交；（4）**多 Session 隔离**；（5）**Provider-specific state compatibility**；（6）**长期 Memory 污染与过期**。
 
-**面试加分点：** 结合 Nanobot 源码中 `MessageBus` 的双队列设计来解释状态管理的实际工程方案。
+Nanobot current-source 的对应机制包括：
 
----
+- per-session pending queue + single worker 保证 FIFO
+- Session Lock 保护关键区
+- `NANOBOT_MAX_CONCURRENT_REQUESTS` 可选 global cap
+- checkpoint / recovery
+- AutoCompact / Session Summary
+- Provider Conversation State
+- Dream + Git-backed Durable Memory
+
+**面试加分点：** “Session 互斥”和“全局并发限制”是两个不同问题；current-source 不再是固定 `_concurrency_gate(3)`。
 
 ### Q12. 如何保证 Agent 工具调用的可靠性？
 
@@ -1290,11 +1315,18 @@ Long-term Memory 只保留跨 Session 稳定信息。
 
 ### Q132. Agent 线上事故案例：某次工具调用导致的循环和如何修复
 
-**答案：** 这是一个典型的线上事故模式：**事故描述**：Agent 在执行文件搜索任务时，工具返回了一个超大的文件列表（数千个文件），Agent 试图逐一读取每个文件的内容来找到目标信息，导致 AgentLoop 进入了一个几百步的循环，消耗了大量 token 且最终超时。**根因分析**：（1）文件搜索工具没有限制返回结果数量，将几千个文件名全部返回。（2）Agent 没有对大量结果进行优先级排序或过滤，而是暴力遍历。（3）没有设置 Agent 循环的最大步骤数限制。**修复措施**：（1）工具层面：为搜索工具添加 `max_results` 参数，默认最多返回 20 个结果。（2）结果层面：应用 `_TOOL_RESULT_MAX_CHARS` 截断，防止超大结果注入上下文。（3）循环层面：设置 AgentLoop 最大迭代次数（如 Nanobot 的 15 次限制）。（4）Prompt 层面：在工具描述中明确说明「如果结果过多，请先缩小搜索范围」。
+**答案：** 假设搜索 Tool 返回数千条结果，Agent 不断遍历并再次调用搜索，最终造成 Token、延迟和调用次数爆炸。不要只在某一层“加个截断”：
 
-**面试加分点：** 能说出这类事故的预防原则——「Defense in Depth（纵深防御）」，从工具、循环、prompt 多个层面设置防护。
+1. **Tool Input**：提供 `top_k/max_results/filter`，让模型可以主动缩小范围。
+2. **Retrieval**：召回后做 Dedup/Rerank。
+3. **Tool Result Governance**：设置合理的 `max_tool_result_chars` 或 spill/summarization 策略。
+4. **Loop Budget**：配置 max tool iterations、timeout。
+5. **Context Management**：必要时 compact/summarize。
+6. **Prompt/Skill**：告诉模型结果过多时先缩小搜索范围，而不是暴力遍历。
 
----
+以 Nanobot current-source 为例，不应再回答“固定 15 次迭代 + 固定 _TOOL_RESULT_MAX_CHARS 常量”；相关 Budget 已参数化，并与 Runner/Context Compaction 一起治理。
+
+**面试加分点：** 这是典型 **Defense in Depth**：防止一个边界失效后整个 Agent 失控。
 
 ### Q133. 代码评审（Code Review）Agent 代码时应关注什么？
 
