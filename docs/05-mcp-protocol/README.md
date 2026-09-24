@@ -1,5 +1,7 @@
 # 05 - MCP 协议详解
 
+> **2026 current-source 说明**：本章直接沿用原版 learn-nanobot 的章节结构与主体内容；凡涉及 Nanobot 具体源码、配置、路径、记忆、并发、MCP 生命周期等实现细节，均按 HKUDS/nanobot main @ 2026-09-24 (source trace snapshot around 62aa6ba6a33790a656b952ef150517bd70d6eb30) 修订。
+
 > 🎯 **本章目标**：深入理解 MCP（Model Context Protocol）协议的设计思想、三大核心原语、通信机制，以及它在 Nanobot 中的实现。MCP 是 2024-2026 年 AI 领域最重要的标准化协议之一，是面试热门话题。
 
 ---
@@ -557,44 +559,36 @@ MCP：一个 MCP Server 编写一次，所有支持 MCP 的应用都能使用。
 | **动态性** | 运行时动态发现 | 启动时加载 | 编译时定义 |
 | **跨框架复用** | 是（MCP 标准） | 否（Nanobot 特有） | 否（各框架不同） |
 
+
 ### 三者在 Nanobot 中的协作
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                三者在 Nanobot 中的关系                     │
-│                                                         │
-│  ContextBuilder.build_system_prompt():                  │
-│  ┌─────────────────────────────────────────────┐        │
-│  │  System Prompt                              │        │
-│  │                                             │        │
-│  │  # Identity                                 │        │
-│  │  你是一个 AI 助手...                         │        │
-│  │                                             │        │
-│  │  # Skills  ← SKILL.md 的内容被嵌入          │        │
-│  │  当用户要求代码审查时，请...                   │        │
-│  │                                             │        │
-│  │  # Memory                                   │        │
-│  │  用户偏好：简洁回答...                        │        │
-│  └─────────────────────────────────────────────┘        │
-│                                                         │
-│  tools 参数 (Function Calling 格式):                     │
-│  ┌─────────────────────────────────────────────┐        │
-│  │  [                                          │        │
-│  │    {name: "message", ...},      ← 内置工具   │        │
-│  │    {name: "spawn_agent", ...},  ← 内置工具   │        │
-│  │    {name: "save_memory", ...},  ← 虚拟工具   │        │
-│  │    {name: "mcp_fs_read", ...},  ← MCP 工具   │        │
-│  │    {name: "mcp_gh_issue", ...}, ← MCP 工具   │        │
-│  │  ]                                          │        │
-│  └─────────────────────────────────────────────┘        │
-│                                                         │
-│  LLM 的输入 = System Prompt + History + Tools           │
-│  → Skill 影响 LLM "怎么思考"                            │
-│  → Tools (MCP + 内置) 决定 LLM "能做什么"                │
-│  → Function Calling 是 LLM "选择工具" 的机制             │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-```
+current-source 中三者的关系可以画成：
+
+~~~text
+Skill
+  ↓
+ContextBuilder / RuntimeContextBlock
+  ↓
+模型理解“应该怎么做”
+
+Function / Tool Calling
+  ↓
+AgentRunner
+  ↓
+ToolRegistry
+
+MCP
+  ↓
+MCPProvider
+  ↓
+把远程 Server capability 适配并注册进同一个 ToolRegistry
+~~~
+
+因此：
+- Skill 是 instruction capability；
+- Tool Calling 是模型提出结构化动作请求的机制；
+- MCP 是 Host 与外部 capability server 的标准化连接协议；
+- MCP Tool 最终仍以统一 Tool 的形式暴露给 AgentRunner。
 
 ### 面试回答
 
@@ -602,84 +596,84 @@ MCP：一个 MCP Server 编写一次，所有支持 MCP 的应用都能使用。
 
 ---
 
+
 ## 5.8 MCP 在 Nanobot 中的实现
 
-### current-source 整体架构
+### 整体集成架构
 
-2026-09-24 current-source 不应再用“AgentLoop 内部持有 MCP wrapper 列表”来理解。
+current-source 的关键变化是：**MCPProvider 是 application-owned infrastructure，不由 AgentLoop 自己管理生命周期。**
 
-```
-config.json / Agent Plugin
-        │
-        ▼
-MCPServerConfig
-        │
-        ▼
+~~~text
+Config / Agent Plugin
+        ↓
+MCP Server Config
+        ↓
 Application Composition Root
-        │
-        ├── shared ToolRegistry
-        │         ▲
-        │         │ dynamic registration
-        │      MCPProvider
-        │         │
-        │      connect()
-        │         │
-        │      MCP Server
-        │
-        └── AgentLoop
-                │
-                ▼
-            AgentRunner
-                │
-                ▼
-          ToolRegistry.execute
-```
+        ↓
+shared ToolRegistry
+     ↙             ↘
+MCPProvider       AgentLoop
+     ↓               ↓
+connect()         AgentRunner
+     ↓               ↓
+discover         get_definitions / execute
+     ↓
+register MCP Tools
+~~~
 
-### MCPProvider
+典型 CLI 组装思路：
 
-文件：
+~~~text
+tools = ToolRegistry()
+mcp_provider = MCPProvider.from_config(config, tools)
+agent_loop = AgentLoop.from_config(config, tool_registry=tools)
+await mcp_provider.connect()
+...
+await mcp_provider.aclose()
+~~~
 
-```
-nanobot/agent/tools/mcp.py
-```
+### MCPProvider 核心实现
 
-current class responsibility：
+current `nanobot/agent/tools/mcp.py` 中：
 
-> Own configured MCP connections and their dynamic tool registrations.
+~~~python
+class MCPProvider:
+    """Own configured MCP connections and their dynamic tool registrations."""
+~~~
 
 它负责：
+1. 从 Config + enabled Agent Plugins 汇总 MCP Server；
+2. 建立 stdio / HTTP(SSE) connection；
+3. 调用 Server capability discovery；
+4. 按 `enabled_tools` 做 allowlist；
+5. 将 capability 包装并注册到共享 ToolRegistry；
+6. 管理 reconnect / close。
 
-- 读取 configured/plugin MCP Servers
-- 建立 stdio / HTTP 等连接
-- list tools/resources/prompts
-- 按 `enabledTools` 过滤能力
-- 包装并注册到共享 ToolRegistry
-- reconnect / close 生命周期
+### 传输选择逻辑
 
-### 为什么 Registry 是共享的
+current 配置支持本地 stdio 和网络 transport。网络路径受 Nanobot SSRF guard 保护；私有 HTTP 目标如确有必要，需要显式配置窄范围 `tools.ssrfWhitelist`。
 
-CLI current 组合方式可以概括为：
+### 工具名命名规则
 
-```python
-tools = ToolRegistry()
-mcp_provider = MCPProvider.from_config(runtime_config, tools)
-await mcp_provider.connect()
-agent_loop = AgentLoop.from_config(runtime_config, tool_registry=tools)
-```
+MCP capability 会被包装成 Host 内唯一名称，具体命名由 current wrapper 实现决定。配置 allowlist 既可以匹配 raw MCP tool name，也可以匹配 wrapped name。
 
-所以 MCP 是 Tool 的来源之一，而不是另一套独立执行系统。
+不要在项目代码里依赖旧教程写死的某个前缀规则；先用 current ToolRegistry / WebUI 查看实际注册名。
 
-### enabledTools
+### enabledTools：最小权限
 
-current `MCPServerConfig.enabled_tools` 默认可为 `["*"]`。生产环境应尽量只暴露 Agent 真正需要的 Tool；限制 Tool 时，current implementation 也相应收紧 Resources/Prompts 的暴露。
+`MCPServerConfig.enabled_tools` 默认可为 `["*"]`。生产项目建议按需要收窄。
 
-### Agent Plugin
+~~~text
+Server 能力全集
+   ↓ enabledTools
+Agent 实际可见能力
+~~~
 
-`nanobot/agent/plugins.py` 可以把 Plugin 声明的 MCP Server 与用户配置合并。User config 在命名冲突时优先，从而允许本地 override。
+这既减少攻击面，也减少模型工具选择空间。
 
-### 安全
+### Agent Plugin 集成
 
-HTTP/SSE MCP 使用 Nanobot 网络安全 guard；访问私有 HTTP endpoint 时必须谨慎配置窄范围 `tools.ssrfWhitelist`。stdio MCP 本质会启动本地进程，需要审查 command/args/env/cwd。
+current `agent_plugin_mcp_servers()` 会把“已启用 Plugin 携带的 MCP Server”与用户显式配置合并；显式用户配置在名字冲突时优先。
 
 ## 5.9 MCP 生态发展时间线
 
@@ -730,7 +724,7 @@ MCP 生态发展时间线
 │
 ├── 02月  Nanobot 发布（原生 MCP 支持）
 │         → 从第一天就内置 MCP 支持
-│         → MCPToolWrapper 无缝集成
+│         → MCP tool adapter / wrapper 无缝集成
 │
 ├── 03月  MCP 规范 v1.2 发布
 │         → 增加多模态支持（图像、音频）
@@ -772,13 +766,14 @@ MCP 生态发展时间线
 > 
 > MCP 是一个 Client-Server 协议，工具的定义和执行都在 MCP Server 中完成，Client 只需要遵循协议就能使用任何 MCP Server 提供的工具。
 > 
-> 在实际的 Agent 框架中（如 Nanobot），两者配合使用：MCP 负责工具的'供给侧'——发现和执行工具；Function Calling 负责'选择侧'——让 LLM 自主选择调用哪个工具。框架的 MCPToolWrapper 就是连接两者的桥梁。"
+> 在实际的 Agent 框架中（如 Nanobot），两者配合使用：MCP 负责工具的'供给侧'——发现和执行工具；Function Calling 负责'选择侧'——让 LLM 自主选择调用哪个工具。框架的 MCP tool adapter / wrapper 就是连接两者的桥梁。"
+
 
 ### Q5: Nanobot 是如何集成 MCP 的？
 
-> “current-source 把 MCP Connection 作为 application-owned infrastructure。Composition Root 创建 shared ToolRegistry 和 MCPProvider；MCPProvider 从 `config.json` 的 `tools.mcpServers` 以及 enabled Agent Plugins 收集 Server 配置，connect 后发现 Capability，并把允许的 MCP Tool 动态注册到同一个 ToolRegistry。AgentLoop/AgentRunner 使用这个 Registry，所以执行层不需要区分 Native Tool 和 MCP Tool。MCPProvider 还负责 reconnect/close 等连接生命周期。这个设计的关键不是某一个 Wrapper 类，而是 shared Registry + clear lifecycle ownership。”
+**参考答案（current-source）：**
 
-
+> Nanobot 在 application composition root 中创建共享 ToolRegistry 和 MCPProvider。MCPProvider 读取 config 以及 enabled Agent Plugins 的 MCP Server 配置，连接 Server 后发现 Tools/Resources/Prompts，并按 enabledTools 做能力过滤。MCP Tool 被适配成统一 Tool 注册到共享 ToolRegistry，AgentLoop/AgentRunner 因此不需要关心工具来自本地还是 MCP。MCPProvider 的 connect/reconnect/aclose 生命周期属于应用层，而不是 AgentLoop。
 
 ### Q6: MCP 的 stdio 和 HTTP 传输有什么区别？
 
@@ -790,75 +785,56 @@ MCP 生态发展时间线
 
 ---
 
+
 ## 5.11 练习：写一个简单的 MCP Server
 
 ### 目标
 
-实现一个最小 MCP Server，并通过 current Nanobot 的 MCPProvider 接入。
+写一个只读的天气/文档查询 MCP Server，并让 current Nanobot 发现并调用。
 
-### 步骤 1：MCP Server
+### 步骤 1：创建 MCP Server
 
-可以继续使用 Python MCP SDK 编写，例如暴露：
+优先使用当前官方 Python MCP SDK。最小 contract 只暴露一个 Tool，例如：
 
-```
-get_weather(city)
-```
+~~~text
+get_weather(city: str)
+~~~
 
-重点不是 API 本身，而是保证 Tool Schema 清楚、返回结构稳定。
+返回结构化文本/JSON，不要一开始加入数据库、OAuth 和多个 transport。
 
-### 步骤 2：current Nanobot 配置
+### 步骤 2：在 Nanobot 中配置
 
-current 配置在：
+current Config 是：
 
-```
+~~~text
 ~/.nanobot/config.json
-```
+~~~
 
-MCP Server 配置位于：
+使用 current `tools.mcpServers` schema 配置 stdio Server；也可以通过 WebUI Settings / Apps / MCP 管理界面添加。
 
-```
-tools.mcpServers.<name>
-```
+重要字段：
+- type / command / args / env / cwd（stdio）；
+- url / headers（HTTP/SSE）；
+- toolTimeout；
+- enabledTools。
 
-建议优先通过 WebUI Apps / MCP 管理界面配置；手工 JSON 时以官方 `docs/configuration.md` 的 current schema 为准。
+### 步骤 3：测试
 
-### 步骤 3：最小权限
+1. 先直接运行 Server，确保不会启动即退出；
+2. 启动 `nanobot agent` 或 `nanobot gateway --verbose`；
+3. 在日志/工具列表中确认 MCP Tool 已注册；
+4. 让 Agent 调用；
+5. 把 `enabledTools` 收窄后再次测试。
 
-不要一开始使用所有能力。练习把：
-
-```
-enabledTools
-```
-
-限制为你刚实现的 Tool，并观察 Agent Tool List。
-
-### 步骤 4：验证连接生命周期
-
-启动：
-
-```bash
-nanobot gateway --verbose
-```
-
-观察：
-
-1. MCPProvider connect
-2. Server capability discovery
-3. ToolRegistry 注册
-4. Agent Tool Call
-5. Tool Result
-6. shutdown 时 connection close
-
-### 步骤 5：故障实验
+### 步骤 4：故障注入
 
 故意让 Server：
+- 返回错误；
+- 超时；
+- 重启；
+- 移除一个 Tool。
 
-- 启动失败
-- Tool 超时
-- 返回异常
-- 暂时断开
-
-观察 Nanobot 如何报告/reconnect。真正理解 MCP，必须理解 failure path，而不仅是成功 Demo。
+观察 MCPProvider/ToolRegistry/AgentRunner 如何表现。这个实验比只跑通 happy path 更有面试价值。
 
 ## 5.12 本章总结
 
@@ -888,7 +864,7 @@ nanobot gateway --verbose
 │  └── Streamable HTTP = 新标准                          │
 │                                                      │
 │  在 Nanobot 中                                        │
-│  ├── MCPToolWrapper 包装远程工具                       │
+│  ├── MCP tool adapter / wrapper 包装远程工具                       │
 │  ├── 命名规则: mcp_{server}_{tool}                     │
 │  ├── _normalize_schema_for_openai 格式转换             │
 │  └── 配置驱动的传输选择                                │
@@ -909,7 +885,7 @@ nanobot gateway --verbose
 - [ ] 能列举三大原语及其控制方
 - [ ] 能对比 MCP 和 Function Calling
 - [ ] 能描述 MCP 在 Nanobot 中的实现
-- [ ] 能解释 MCPToolWrapper 的作用
+- [ ] 能解释 MCP tool adapter / wrapper 的作用
 - [ ] 能说出 stdio 和 HTTP 传输的区别
 
 ---
@@ -922,4 +898,4 @@ nanobot gateway --verbose
 
 ---
 
-> 📝 **本章小结**：MCP 是 AI 工具生态标准化的里程碑协议。它通过 Host-Client-Server 三角架构和 Tools/Resources/Prompts 三大原语，解决了 AI 应用与工具之间的集成碎片化问题。在 Nanobot 中，MCPToolWrapper 是 MCP 与框架工具系统的桥梁。理解 MCP 不仅是面试热点，也是 AI 工程师的必备知识。
+> 📝 **本章小结**：MCP 是 AI 工具生态标准化的里程碑协议。它通过 Host-Client-Server 三角架构和 Tools/Resources/Prompts 三大原语，解决了 AI 应用与工具之间的集成碎片化问题。在 Nanobot 中，MCP tool adapter / wrapper 是 MCP 与框架工具系统的桥梁。理解 MCP 不仅是面试热点，也是 AI 工程师的必备知识。
