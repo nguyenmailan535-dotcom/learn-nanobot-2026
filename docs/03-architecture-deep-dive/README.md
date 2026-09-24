@@ -1,5 +1,7 @@
 # 03 - 架构深入解析
 
+> **2026 current-source 说明**：本章直接沿用原版 learn-nanobot 的章节结构与主体内容；凡涉及 Nanobot 具体源码、配置、路径、记忆、并发、MCP 生命周期等实现细节，均按 HKUDS/nanobot main @ 2026-09-24 (source trace snapshot around 62aa6ba6a33790a656b952ef150517bd70d6eb30) 修订。
+
 > 🎯 **本章目标**：深入理解 Nanobot 的五层架构、四大核心模块、数据流以及 10 个关键设计模式。这一章是面试中展现"技术深度"的核心素材。
 
 ---
@@ -17,336 +19,292 @@
 
 ---
 
+
 ## 3.1 整体架构概览
 
 ### 五层架构
 
-Nanobot 的架构可以清晰地划分为五个层次，从上到下分别是：
+沿用原版“五层”视角，但按 current-source 重新映射：
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                                                                 │
-│  Layer 5: UI 层 (User Interface)                                │
-│  ┌──────────┬──────────┬────────┬────────┬───────┬──────────┐  │
-│  │ Telegram │ Discord  │  飞书  │  钉钉  │ 微信  │   Web    │  │
-│  └────┬─────┴────┬─────┴───┬────┴───┬────┴──┬────┴────┬─────┘  │
-│       │          │         │        │       │         │         │
-│═══════╪══════════╪═════════╪════════╪═══════╪═════════╪═════════│
-│       │          │         │        │       │         │         │
-│  Layer 4: Gateway 层 (消息网关)                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │           ChannelManager + MessageBus                   │    │
-│  │   ┌──────────────────┐  ┌──────────────────────┐       │    │
-│  │   │  Inbound Queue   │  │   Outbound Queue     │       │    │
-│  │   │  (用户消息入队)   │  │   (回复消息出队)      │       │    │
-│  │   └────────┬─────────┘  └──────────┬───────────┘       │    │
-│  └────────────┼────────────────────────┼───────────────────┘    │
-│               │                        │                        │
-│═══════════════╪════════════════════════╪════════════════════════│
-│               │                        ↑                        │
-│  Layer 3: Core Agent 层 (核心智能体)                             │
-│  ┌────────────▼────────────────────────┼───────────────────┐    │
-│  │                                     │                   │    │
-│  │   ┌──────────────┐   ┌─────────────┴──┐                │    │
-│  │   │  AgentLoop   │──→│  AgentRunner   │                │    │
-│  │   │  (消息消费)   │   │  (ReAct循环)   │                │    │
-│  │   └──────────────┘   └───────┬────────┘                │    │
-│  │                              │                          │    │
-│  │         ┌────────────────────┼────────────────┐         │    │
-│  │         │                    │                │         │    │
-│  │   ┌─────▼──────┐   ┌───────▼────────┐  ┌────▼─────┐  │    │
-│  │   │ContextBuilder│ │  MemoryStore   │  │SubAgent  │  │    │
-│  │   │(上下文构建)  │  │  (记忆管理)    │  │Manager   │  │    │
-│  │   └─────────────┘  └───────────────┘  └──────────┘  │    │
-│  │                                                      │    │
-│  └──────────────────────────────────────────────────────┘    │
-│               │                                              │
-│═══════════════╪══════════════════════════════════════════════│
-│               │                                              │
-│  Layer 2: Provider 层 (LLM 提供者)                            │
-│  ┌────────────▼──────────────────────────────────────────┐   │
-│  │  ┌────────┐ ┌─────────┐ ┌────────┐ ┌──────────────┐  │   │
-│  │  │ OpenAI │ │Anthropic│ │DeepSeek│ │  Ollama/...  │  │   │
-│  │  └────────┘ └─────────┘ └────────┘ └──────────────┘  │   │
-│  └───────────────────────────────────────────────────────┘   │
-│               │                                              │
-│═══════════════╪══════════════════════════════════════════════│
-│               │                                              │
-│  Layer 1: Tool 层 (工具执行)                                  │
-│  ┌────────────▼──────────────────────────────────────────┐   │
-│  │  ┌───────────────┐  ┌──────────────────────────────┐  │   │
-│  │  │  Built-in Tools│  │       MCP Tools              │  │   │
-│  │  │  ·MessageTool  │  │  ·MCPToolWrapper             │  │   │
-│  │  │  ·SpawnTool    │  │  ·mcp_{server}_{tool}        │  │   │
-│  │  │  ·save_memory  │  │  ·远程/本地 MCP Server       │  │   │
-│  │  └───────────────┘  └──────────────────────────────┘  │   │
-│  └───────────────────────────────────────────────────────┘   │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-```
+~~~text
+┌─────────────────────────────────────────────────────┐
+│ Layer 5：Surface                                    │
+│ CLI / TUI / WebUI / Chat Apps / API / SDK          │
+├─────────────────────────────────────────────────────┤
+│ Layer 4：Transport & Runtime Host                   │
+│ ChannelManager / MessageBus / Gateway               │
+├─────────────────────────────────────────────────────┤
+│ Layer 3：Turn Orchestration                         │
+│ AgentLoop / TurnContext / ContextBuilder            │
+├─────────────────────────────────────────────────────┤
+│ Layer 2：Model Execution                            │
+│ AgentRunner / Provider / ToolRegistry / MCP         │
+├─────────────────────────────────────────────────────┤
+│ Layer 1：State & Infrastructure                     │
+│ Session / Memory / Skills / Plugins / Cron / Security│
+└─────────────────────────────────────────────────────┘
+~~~
 
 ### 各层职责说明
 
-| 层次 | 名称 | 核心职责 | 关键组件 |
-|------|------|----------|----------|
-| **Layer 5** | UI 层 | 面向用户的交互界面 | Telegram/Discord/飞书/钉钉/微信等 Channel 适配器 |
-| **Layer 4** | Gateway 层 | 消息的统一收发 | MessageBus（双队列）、ChannelManager |
-| **Layer 3** | Core Agent 层 | 核心推理和决策 | AgentLoop、AgentRunner、ContextBuilder、MemoryStore、SubagentManager |
-| **Layer 2** | Provider 层 | LLM 调用封装 | OpenAI/Anthropic/DeepSeek 等 Provider |
-| **Layer 1** | Tool 层 | 工具注册与执行 | ToolRegistry、MCPToolWrapper、内置工具 |
+| 层 | 职责 | current-source 例子 |
+|---|---|---|
+| Surface | 用户和外部系统入口 | CLI、WebUI、Channels、API、SDK |
+| Transport/Host | 消息路由与长期服务宿主 | MessageBus、ChannelManager、Gateway |
+| Turn | 一个用户 Turn 的状态恢复、Context、Delivery | AgentLoop、TurnContext |
+| Execution | LLM ↔ Tool 的循环 | AgentRunner、Provider、ToolRegistry |
+| State/Infra | 持久化、扩展、安全、调度 | SessionManager、MemoryStore、MCPProvider、CronService |
 
 ### 架构设计原则
 
-Nanobot 的架构遵循以下核心原则：
+1. **Product concern 与 model execution 分离**：AgentLoop ≠ AgentRunner。
+2. **统一 Tool Contract**：native/MCP/plugin capability 最终统一到 ToolRegistry。
+3. **Session 与 Context 分离**：持久化状态不等于本轮模型输入。
+4. **Application-owned infrastructure**：例如 MCPProvider 生命周期由 composition root 管理。
+5. **Workspace scope 是安全与语义边界**。
+6. **事件与 Delivery 解耦 Channel 与 Runner**。
 
-**1. 关注点分离（Separation of Concerns）**
-
-每一层只负责自己的职责，层与层之间通过明确的接口交互。Channel 不需要知道 AgentLoop 的实现细节，AgentLoop 不需要知道消息来自哪个平台。
-
-**2. 依赖倒置（Dependency Inversion）**
-
-高层模块不依赖低层模块的具体实现，而是依赖抽象接口。例如 AgentRunner 不直接依赖 OpenAI SDK，而是通过 Provider 抽象层调用 LLM。
-
-**3. 单一职责（Single Responsibility）**
-
-每个类只负责一件事：AgentLoop 负责消息消费和会话管理，AgentRunner 负责 ReAct 循环，ContextBuilder 负责构建 prompt，MemoryStore 负责记忆读写。
-
----
-
-![Nanobot 架构漫画](../../comics/02-nanobot-architecture.png)
-
-*Nanobot 四大核心模块：AgentLoop（核心引擎）、ToolRegistry（工具注册表）、MEMORY.md（长期记忆）、SkillLoader（技能加载器）*
 
 ## 3.2 四大核心模块详解
 
-原版这里把 AgentLoop、AgentRunner、MemoryStore、MessageBus 视为“四大核心模块”。这些名字仍然重要，但 current-source 的职责已经发生明显演进。
+原版以四大模块讲解。current-source 仍可沿用这个结构，但具体责任需要更新。
 
-### 3.2.1 AgentLoop —— 面向用户 Turn 的编排层
+### 3.2.1 AgentLoop（智能体循环）——Turn 编排器
 
-`nanobot/agent/loop.py` 当前负责：
+current `AgentLoop` 不应再描述为“单独承担全部推理的心脏”。它主要面向 channel-facing turn，持有/协调：
 
-- InboundMessage 的 Session admission
-- per-session pending queue / FIFO
-- TurnContext
-- restore → compact → command → build → run → save → respond
-- ModelRuntimeResolver
-- ContextBuilder / SessionManager 协作
-- Workspace Scope
-- TurnDelivery
-- Subagent / AutoCompact / CommandRouter 的协调
+~~~text
+ModelRuntimeResolver
+ContextBuilder
+SessionManager
+ToolRegistry
+AgentRunner
+Consolidator
+SubagentManager
+AutoCompact
+CommandRouter
+WorkspaceScopeResolver
+TurnDelivery
+~~~
 
-它不再等于“整个 ReAct 执行器”。
+一次普通 Turn 明确经过：
 
-### 3.2.2 AgentRunner —— 面向模型的 Provider/Tool Loop
+~~~text
+restore
+→ compact
+→ command
+→ build
+→ run
+→ save
+→ respond
+~~~
 
-`nanobot/agent/runner.py` 的定位是：
+其中 `run` 才进入 AgentRunner。
 
-> Run a tool-capable LLM loop without product-layer concerns.
+current inbound 并发控制也不再是固定 `Semaphore(3)`。同一 Session 使用 pending queue + sole worker + session lock 保持 FIFO；可选全局 gate 由环境变量 `NANOBOT_MAX_CONCURRENT_REQUESTS` 控制，未设置/<=0 表示不主动限流。
 
-它接收 `AgentRunSpec`，负责：
+### 3.2.2 AgentRunner（ReAct 循环）——Model/Tool 执行器
 
-```
-provider call
-→ assistant response
-→ tool calls?
-→ ToolRegistry execution
-→ Tool Result
-→ next provider call
-→ final answer / limit / error
-```
+`AgentRunner` 的类级定位是：**tool-capable LLM loop without product-layer concerns**。
 
-并处理 streaming、hooks、provider state、compaction、follow-up injection、checkpoint 等执行语义。
+它消费 `AgentRunSpec`，负责：
+- initial transcript / compaction state；
+- provider streaming；
+- tool call parsing / execution；
+- concurrent tool calls；
+- tool result governance；
+- provider state；
+- checkpoint；
+- injected follow-ups；
+- stop reason；
+- hooks。
 
-### 3.2.3 Session / Memory —— 多层状态系统
+概念循环仍然是：
 
-current-source 不再是单纯 `MEMORY.md + HISTORY.md`：
-
-```
-Session JSONL
+~~~text
+Provider
   ↓
-AutoCompact / Consolidator
-  ↓
-memory/history.jsonl
-  ↓
-Dream
-  ↓
-SOUL.md / USER.md / memory/MEMORY.md
-```
+Assistant response
+  ├─ final → stop
+  └─ tool calls
+       ↓
+   ToolRegistry.execute
+       ↓
+   tool results
+       ↓
+   Provider again
+~~~
 
-`HISTORY.md` 主要用于 legacy migration。
+### 3.2.3 MemoryStore（记忆系统）——Durable Memory I/O
 
-### 3.2.4 MessageBus —— 双队列 + Typed Event Dispatch
+current MemoryStore 注释明确：
 
-MessageBus 仍然持有：
+~~~text
+Pure file I/O for memory files:
+MEMORY.md, history.jsonl, SOUL.md, USER.md
+~~~
 
-```
-inbound: Queue[InboundMessage]
-outbound: Queue[OutboundMessage]
-```
+新版链路：
 
-同时 current-source 还支持 local typed event subscriber：
+~~~text
+Session
+→ AutoCompact / Consolidator
+→ memory/history.jsonl
+→ Dream
+→ SOUL.md / USER.md / memory/MEMORY.md
+~~~
 
-- `publish()`：按注册顺序 await 本地 subscriber
-- `publish_event()`：将 typed event 转为 routed outbound delivery
-- local state transition 不需要等待网络发送
+旧 `memory/history.jsonl` 只保留 legacy migration 逻辑；旧 `Dream / MemoryStore` 虚拟工具也不是 current 主路径。
 
-因此今天更准确的描述是“消息双队列 + typed runtime event dispatch”，而不只是简单的生产者/消费者队列。
+### 3.2.4 MessageBus（消息总线）——Transport/Core 解耦
+
+MessageBus 继续承担 Channel 与 Agent Core 的事件边界。
+
+~~~text
+Channel
+→ InboundMessage
+→ MessageBus
+→ AgentLoop
+→ runtime/output events
+→ OutboundMessage
+→ ChannelManager / Channel
+~~~
+
+current-source 还存在更多 typed runtime/output events 和 TurnDelivery，因此不要把 MessageBus 简化为“只有两个 Queue 的数据结构”；它是 Runtime Event Routing 的核心边界之一。
+
 
 ## 3.3 数据流图
 
 ### 完整消息处理流程
 
-```
-Chat App / CLI / WebUI
-       │
-       ▼
-InboundMessage
-       │
-       ▼
-MessageBus.inbound
-       │
-       ▼
-AgentLoop.run()
-       │
-       ├── effective session key
-       ├── per-session pending queue
-       └── _dispatch_one()
-                │
-                ▼
-          _process_message()
-                │
-                ▼
-          TurnContext
-                │
-      ┌─────────┼─────────┐
-      ▼         ▼         ▼
-   restore   compact   command
-                          │
-                          ▼
-                        build
-                          │
-                 TranscriptInput
-                          │
-                          ▼
-                    AgentRunSpec
-                          │
-                          ▼
-                     AgentRunner
-                    ↙           ↘
-               Provider       ToolRegistry
-                    ↖           ↙
-                      Tool Result
-                          │
-                          ▼
-                    AgentRunResult
-                          │
-                    save → respond
-                          │
-                          ▼
-                 TurnDelivery / Bus
-                          │
-                          ▼
-                       Channel
-```
+~~~text
+1. Channel / WebUI 接收输入
+        ↓
+2. 构造 InboundMessage
+        ↓
+3. MessageBus.consume_inbound()
+        ↓
+4. AgentLoop 计算 effective session key
+        ↓
+5. _pending_queues[session] 做 FIFO admission
+        ↓
+6. _process_message() 创建 TurnContext
+        ↓
+7. restore / compact / command / build
+        ↓
+8. ContextBuilder + Session history + RuntimeContext
+        ↓
+9. AgentRunSpec
+        ↓
+10. AgentRunner
+      ↔ Provider
+      ↔ ToolRegistry
+        ↓
+11. AgentRunResult
+        ↓
+12. persist stage → SessionManager.save
+        ↓
+13. respond → TurnDelivery / OutboundMessage
+        ↓
+14. ChannelManager → 平台
+~~~
 
-### 关键边界
+current-source 还支持：
+- active Turn 中 follow-up injection；
+- Subagent completion injection；
+- provider conversation state checkpoint；
+- cancellation/recovery；
+- streaming events。
 
-- Channel 只做平台协议 ↔ Inbound/OutboundMessage 适配。
-- AgentLoop 负责一个 Session-facing Turn。
-- AgentRunner 负责一个 model-facing execution loop。
-- ContextBuilder 决定模型本轮看到什么。
-- ToolRegistry 统一 Native/MCP/Plugin Tool 的运行时接口。
-- SessionManager 管 conversation persistence。
-- Memory/Dream 管跨更长时间的 durable knowledge。
 
 ## 3.4 模块间的协作关系
 
 ### 依赖关系图
 
-```
-Application Composition Root
+~~~text
+Composition Root
 ├── MessageBus
-├── ToolRegistry
-├── MCPProvider ────────────┐
-├── Provider                │ dynamic MCP tools
-├── CronService             ▼
-└── AgentLoop ─────────→ ToolRegistry
-     ├── ContextBuilder
-     ├── SessionManager
-     ├── ModelRuntimeResolver
-     ├── AgentRunner
-     ├── Consolidator
-     ├── SubagentManager
-     ├── AutoCompact
-     └── CommandRouter
-```
+├── shared ToolRegistry
+├── MCPProvider ───────────────┐
+├── Provider                   │ registers dynamic tools
+└── AgentLoop                  │
+    ├── ContextBuilder         │
+    ├── SessionManager         │
+    ├── AgentRunner ◄──────────┘
+    ├── Consolidator
+    ├── SubagentManager
+    ├── AutoCompact
+    └── TurnDelivery
+~~~
 
-### 创建顺序为什么重要
+### 创建顺序
 
-current-source 的 `AgentLoop.from_config(..., tool_registry=...)` 明确要求 caller-owned ToolRegistry。这样 CLI、Gateway、SDK 等入口可以：
+典型长期运行入口的思想是：
 
-1. 创建共享 ToolRegistry；
-2. 创建 MCPProvider 并让它向 Registry 动态注册能力；
-3. 创建 AgentLoop；
-4. 启动 MCP / Channel / Gateway 等 application-owned infrastructure；
-5. shutdown 时由同一 owner 关闭资源。
+~~~text
+1. load Config
+2. create MessageBus
+3. create shared ToolRegistry
+4. create MCPProvider with shared registry
+5. create Provider / AgentLoop
+6. connect MCP infrastructure
+7. start Channels / Cron / Gateway services
+8. run AgentLoop
+9. shutdown: stop runtime + aclose MCP/owned resources
+~~~
 
-这是典型 Composition Root，而不是让 AgentLoop 随意 new 所有依赖。
+重要点：
+
+> `AgentLoop.from_config()` 要求 caller-owned ToolRegistry，就是为了让 application composition 可以与 MCPProvider 共享 registry。
+
 
 ## 3.5 关键设计模式
 
-### 模式 1：异步消息总线 / 生产者-消费者
+### 模式 1：异步消息总线 / 生产者-消费者模式
 
-Channel 向 inbound queue 发布，Core 向 outbound queue 发布；平台 SDK 与 Agent Core 解耦。
+Channel 与 Agent Core 通过 Inbound/Outbound event contract 解耦。
 
-### 模式 2：Registry / Discovery
+### 模式 2：Registry Pattern
 
-Provider、Tool、Channel 都尽量通过 Registry/Discovery 管理，而不是在核心逻辑里写长 if/elif。
+Provider metadata 与 Tool 都使用 Registry/Discovery 思路。模型执行层只依赖统一 contract。
 
 ### 模式 3：Strategy / Adapter
 
-不同 Provider、Channel、MCP Tool 共享高层 contract，但保留各自实现。
+不同 Provider、Channel、MCP Tool Adapter 在统一接口下替换。
 
 ### 模式 4：Composition Root
 
-共享 ToolRegistry、MCPProvider、CronService 等 infrastructure 在 CLI/Gateway/SDK 启动层组装。
+MCPProvider、ToolRegistry、Channels、Cron 等资源在应用入口组装，避免业务对象偷偷管理全局资源生命周期。
 
 ### 模式 5：Pipeline
 
-current Turn 明确分为：
+一次 Turn 分成：
 
-```
+~~~text
 restore → compact → command → build → run → save → respond
-```
+~~~
 
-每个 stage 有单独 timing/error boundary。
+每个阶段都有统一的 timing/error logging。
 
 ### 模式 6：Context Object
 
-`TurnContext` 集中保存一次 Turn 的共享状态，避免跨阶段传递大量独立参数。
+`TurnContext` 集中保存一次 Turn 跨阶段共享的状态。
 
-### 模式 7：Workspace / Project Scope
+### 模式 7：Workspace-Centric + Scoped Project Context
 
-Agent-owned state 与 effective project workspace 分离：
-
-- SOUL/USER/Memory/Custom Skills 属于 Agent Workspace
-- Project AGENTS/relative files/shell cwd 属于 Effective Project
+Agent-owned workspace 与 effective project workspace 分开，既支持多项目，又能定义文件/Shell边界。
 
 ### 模式 8：Progressive Disclosure
 
-Skills 先提供 name/description/path summary，需要时再加载完整 SKILL.md，减少 Context Bloat。
+Skills 先注入 summary，需要时再读取 full body；显式 `$skill-name` 可形成 active runtime context。
 
-### 模式 9：Per-session FIFO + Optional Global Concurrency Gate
+### 模式 9：Session FIFO + Optional Global Gate
 
-current-source 通过 `_pending_queues[session_key]` 为每个 Session 建单 worker，保持 FIFO；同时可用 `NANOBOT_MAX_CONCURRENT_REQUESTS` 设置全局并发上限。未设置或 ≤0 表示 Nanobot 不主动加全局 Semaphore。
+同 Session 使用 sole worker 保证顺序；全局并发限流按环境变量可选开启。
 
-### 模式 10：Checkpoint / Recovery
+### 模式 10：Prompt / Provider State Reuse
 
-长 Turn 在 Provider/Tool execution 中产生 checkpoint，异常或进程恢复时可以安全处理未完成状态，而不是把所有失败都当成“重新问一遍”。
-
-### 模式 11：Model-facing Contract
-
-Tool Name、Schema、Error Message、Runtime Context 都是模型契约。修改这些表面行为可能改变模型决策，不能只当普通内部重构。
+current ContextBuilder 与 ProviderConversationState 都在尽量减少不必要的上下文重建；具体是否命中 provider cache 取决于 Provider 能力。
 
 ## 3.6 架构对比
 
@@ -357,9 +315,9 @@ Tool Name、Schema、Error Message、Runtime Context 都是模型契约。修改
 | **核心抽象** | MessageBus + AgentLoop | Chain + Agent + Memory + Tool |
 | **编排方式** | LLM 自主决策（隐式） | LangGraph 显式编排 / AgentExecutor |
 | **消息传递** | 双队列 MessageBus | Callback 机制 |
-| **工具注册** | ToolRegistry + MCPToolWrapper | BaseTool + Toolkit |
-| **配置方式** | JSON / WebUI 文件 | Python 代码 |
-| **记忆实现** | MEMORY.md + HISTORY.md | ConversationBufferMemory / VectorStoreMemory 等 |
+| **工具注册** | ToolRegistry + MCP tool adapter / wrapper | BaseTool + Toolkit |
+| **配置方式** | YAML 文件 | Python 代码 |
+| **记忆实现** | Session + memory/history.jsonl + Dream-managed durable memory | ConversationBufferMemory / VectorStoreMemory 等 |
 | **抽象层级** | 2-3 层 | 5-7 层 |
 | **源码可读性** | 高（4K行，架构清晰） | 低（50万行+，抽象层多） |
 
@@ -386,27 +344,35 @@ Nanobot 的做法：
 
 ---
 
+
 ## 3.7 面试高频题
 
 ### Q1: 请描述 Nanobot 的架构设计
 
-> current-source 可以分为 Surface/Channel、MessageBus、AgentLoop、AgentRunner/Provider/Tools、Session/Memory 五类责任。AgentLoop 负责 Session-facing Turn，AgentRunner 负责 model-facing Provider/Tool Loop；ContextBuilder 和 SessionManager 分别负责“模型这轮看到什么”和“Conversation 如何持久化”。
+> “current Nanobot 可以分成 Surface、Transport/Host、Turn Orchestration、Model Execution、State/Infrastructure 几层。Channel 把平台消息变成 InboundMessage，经 MessageBus 进入 AgentLoop；AgentLoop 负责 Session、Workspace、Context、Command、Persistence 和 Delivery；真正的 Provider/Tool loop 由 AgentRunner 负责。ToolRegistry 统一 native/MCP 能力，SessionManager 负责 conversation durability，Memory 则通过 Consolidation + Dream 形成长期状态。”
 
-### Q2: 为什么 AgentLoop 和 AgentRunner 要拆开？
+### Q2: Nanobot 用了哪些设计模式？
 
-> 两者变化原因不同。Loop 随 Channel、Session、Workspace、Command、Delivery 等产品需求变化；Runner 随 Provider、Tool、Streaming、Compaction 等执行语义变化。拆开后 Subagent 等场景也可以复用 Runner。
+可以答：
+- Adapter / Strategy；
+- Registry / Discovery；
+- Composition Root；
+- Pipeline；
+- Context Object；
+- Producer-Consumer / Event-driven；
+- Progressive Disclosure。
 
-### Q3: MessageBus 现在还是双队列吗？
+### Q3: MessageBus 为什么存在？
 
-> 是，current `MessageBus` 仍有 inbound/outbound Queue；但还增加 typed local event subscriber，`publish` 用于本地状态 fan-out，`publish_event` 复用 outbound delivery，所以“只有双队列”已经不完整。
+核心不是背“双队列”三个字，而是解释：
+- Channel 与 Agent Core 解耦；
+- 不同平台统一消息 contract；
+- streaming/runtime events 可以沿独立 delivery path 发布；
+- Core 不依赖平台 SDK。
 
-### Q4: 会话并发怎么控制？
+### Q4: current 并发模型怎么设计？
 
-> 同 Session 使用 pending queue + single worker 保持 FIFO，并配合 Session Lock；全局请求并发由 `NANOBOT_MAX_CONCURRENT_REQUESTS` 可选控制，默认未设置时不加全局 cap；Subagent 又有独立 `maxConcurrentSubagents`。
-
-### Q5: 旧版 save_memory / HISTORY.md 现在是什么状态？
-
-> current 主路径已经变成 Session → AutoCompact/Consolidation → history.jsonl → Dream → SOUL/USER/MEMORY。HISTORY.md 主要保留 legacy migration；不应再把 save_memory 虚拟工具作为新版记忆架构核心。
+> “同一 Session 有 pending queue + sole worker + lock 保证 FIFO；允许部分 follow-up 在当前 run 中注入。不同 Session 可以并发。全局并发可通过 NANOBOT_MAX_CONCURRENT_REQUESTS 设置正整数 gate，默认不主动限流；Subagent 还有独立 maxConcurrentSubagents。”
 
 ## 3.8 本章总结
 
@@ -419,7 +385,7 @@ Nanobot 的做法：
 │  ├── Gateway 层 → MessageBus 双队列                  │
 │  ├── Core Agent 层 → AgentLoop + AgentRunner         │
 │  ├── Provider 层 → LLM 供应商抽象                    │
-│  └── Tool 层 → ToolRegistry + MCPToolWrapper         │
+│  └── Tool 层 → ToolRegistry + MCP tool adapter / wrapper         │
 │                                                     │
 │  四大核心模块                                        │
 │  ├── AgentLoop → 消息消费 + 会话管理                  │
