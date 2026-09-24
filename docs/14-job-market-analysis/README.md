@@ -435,7 +435,7 @@
 - 理解 ReAct 循环的原理和实现
 - 了解 Agent 的记忆系统（短期/长期/外部）
 - 理解工具调用机制（Tool Calling / Function Calling）
-- 至少读过一个 Agent 框架的核心源码（推荐 Nanobot，仅 4000 行）
+- 至少深入追过一个 Agent 框架的核心运行链（例如 Nanobot current-source 的 MessageBus → AgentLoop → AgentRunner → ToolRegistry → Session）
 - 了解多 Agent 协作模式（Orchestrator-Workers、Pipeline）
 
 **学习建议**：跟随 learn-nanobot 项目的章节逐步深入
