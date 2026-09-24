@@ -277,57 +277,36 @@ workspace/HEARTBEAT.md
 
 ### 核心概念图
 
-```
-┌──────────────────────────────────────────────────┐
-│             Nanobot 并发与调度体系                 │
-│                                                  │
-│  ┌────────────────────────────────────────────┐  │
-│  │              主Agent (Main Agent)          │  │
-│  │  max_tool_iterations: 40                   │  │
-│  │  完整工具集                                 │  │
-│  │                                            │  │
-│  │  ┌──────┐  ┌──────┐  ┌──────────────────┐ │  │
-│  │  │spawn │  │ cron │  │ 其他工具...       │ │  │
-│  │  └──┬───┘  └──┬───┘  └──────────────────┘ │  │
-│  └─────┼────────┼────────────────────────────┘  │
-│        │        │                                │
-│   ┌────▼───┐  ┌─▼──────────────┐                │
-│   │SubAgent│  │  CronService   │                │
-│   │Manager │  │  (APScheduler) │                │
-│   │        │  │                │                │
-│   │ iter:15│  │ cron_expr      │                │
-│   │ 受限   │  │ every_seconds  │                │
-│   │ 工具集 │  │ at             │                │
-│   └───┬────┘  └───────┬───────┘                │
-│       │               │                         │
-│       │    ┌──────────▼──────────┐              │
-│       └───→│    MessageBus       │              │
-│            │   (结果回报通道)     │              │
-│            └─────────────────────┘              │
-│                                                  │
-│  ┌────────────────────────────────────────────┐  │
-│  │           HeartbeatService                 │  │
-│  │  interval_s: 1800                          │  │
-│  │  keep_recent_messages: 5                   │  │
-│  │  定期唤醒Agent，Agent自主决策              │  │
-│  └────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────┘
-```
+~~~text
+Main Agent Turn
+├── Spawn → SubagentManager → AgentRunner
+│             └── maxConcurrentSubagents 控制并发
+│
+├── Cron Tool → CronService
+│              ├── at
+│              ├── every
+│              └── cron (croniter)
+│
+├── Local Trigger → Automation Turn Coordinator
+│
+└── Gateway System Jobs
+               └── Protected Heartbeat Cron
+                    → HEARTBEAT.md
+~~~
 
 ### 面试记忆清单
 
-| 考点 | 一句话回答 |
-|------|-----------|
-| SubAgent 启动 | spawn 工具启动，SubagentManager 管理 |
-| SubAgent 限制 | 15 次迭代，无 message/spawn/cron 工具 |
-| SubAgent 回报 | 通过 MessageBus 发 InboundMessage 回主会话 |
-| Cron 引擎 | 基于 APScheduler |
-| Cron 配置 | every_seconds / cron_expr+tz / at |
-| Cron 防递归 | cron 上下文中禁止创建新 cron |
-| Heartbeat | 周期唤醒 Agent，Agent 自主决策 |
-| keep_recent_messages | 心跳时只保留最近 N 条消息 |
-| 核心原则 | 受控并行 + 防递归 + 最小权限 |
+| 考点 | current-source |
+|---|---|
+| Subagent 执行 | background / inline，复用 AgentRunner |
+| Subagent 迭代 | 由 runtime/AgentLoop 的 max_iterations 同步，不是固定 15 |
+| Subagent 并发 | `agents.defaults.maxConcurrentSubagents`，current default 4 |
+| Cron | current CronService 自管持久化 Job/Timer，使用 croniter |
+| Schedule | at / every / cron |
+| Local Trigger | 把本地/CI 事件路由到绑定 Session |
+| Heartbeat | Gateway 注册的 Protected Cron，读取 HEARTBEAT.md |
+| 核心原则 | 受控并发 + Durable State + Routing + 最小权限 |
 
 ---
 
-> **下一章**：[11 - 安全与部署](../11-security-and-deploy/README.md) —— 生产环境的安全策略和 Docker 部署实践
+> **下一章**：[11 - 安全与部署](../11-security-and-deploy/README.md)
