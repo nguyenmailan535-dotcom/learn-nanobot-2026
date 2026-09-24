@@ -604,144 +604,82 @@ MCP：一个 MCP Server 编写一次，所有支持 MCP 的应用都能使用。
 
 ## 5.8 MCP 在 Nanobot 中的实现
 
-### 整体集成架构
+### current-source 整体架构
 
-以 **2026-09-24 HKUDS/nanobot main** 为准，MCP 的核心 ownership 已经非常明确：
+2026-09-24 current-source 不应再用“AgentLoop 内部持有 MCP wrapper 列表”来理解。
 
-```text
-~/.nanobot/config.json / Enabled Agent Plugins
-                 ↓
-           MCPServerConfig
-                 ↓
-     Application Composition Root
-                 ↓
-         shared ToolRegistry
-            ↙          ↘
-   MCPProvider        AgentLoop
-       ↓                 ↓
-    connect()         AgentRunner
-       ↓                 ↓
-discover capabilities ← Tool definitions
-       ↓
-register wrappers
+```
+config.json / Agent Plugin
+        │
+        ▼
+MCPServerConfig
+        │
+        ▼
+Application Composition Root
+        │
+        ├── shared ToolRegistry
+        │         ▲
+        │         │ dynamic registration
+        │      MCPProvider
+        │         │
+        │      connect()
+        │         │
+        │      MCP Server
+        │
+        └── AgentLoop
+                │
+                ▼
+            AgentRunner
+                │
+                ▼
+          ToolRegistry.execute
 ```
 
-最重要的 current-source 事实：
+### MCPProvider
 
-> **MCP connection 是 application-owned infrastructure。AgentLoop 不负责 MCP 的 connect / close lifecycle。**
+文件：
 
-典型 CLI 组合流程可以概括为：
+```
+nanobot/agent/tools/mcp.py
+```
+
+current class responsibility：
+
+> Own configured MCP connections and their dynamic tool registrations.
+
+它负责：
+
+- 读取 configured/plugin MCP Servers
+- 建立 stdio / HTTP 等连接
+- list tools/resources/prompts
+- 按 `enabledTools` 过滤能力
+- 包装并注册到共享 ToolRegistry
+- reconnect / close 生命周期
+
+### 为什么 Registry 是共享的
+
+CLI current 组合方式可以概括为：
 
 ```python
 tools = ToolRegistry()
 mcp_provider = MCPProvider.from_config(runtime_config, tools)
-
 await mcp_provider.connect()
-
-agent_loop = AgentLoop.from_config(
-    runtime_config,
-    tool_registry=tools,
-)
+agent_loop = AgentLoop.from_config(runtime_config, tool_registry=tools)
 ```
 
-关闭应用时，owning composition root 再负责 `MCPProvider.aclose()`。
+所以 MCP 是 Tool 的来源之一，而不是另一套独立执行系统。
 
-### MCPProvider 核心职责
+### enabledTools
 
-current `nanobot/agent/tools/mcp.py` 中：
+current `MCPServerConfig.enabled_tools` 默认可为 `["*"]`。生产环境应尽量只暴露 Agent 真正需要的 Tool；限制 Tool 时，current implementation 也相应收紧 Resources/Prompts 的暴露。
 
-```python
-class MCPProvider:
-    """Own configured MCP connections and their dynamic tool registrations."""
-```
+### Agent Plugin
 
-它负责：
+`nanobot/agent/plugins.py` 可以把 Plugin 声明的 MCP Server 与用户配置合并。User config 在命名冲突时优先，从而允许本地 override。
 
-1. 读取配置与 Enabled Agent Plugin 提供的 MCP Server；
-2. 建立 stdio / HTTP / SSE 等连接；
-3. 调用 Server capability discovery；
-4. 根据 `enabledTools` 过滤允许暴露的能力；
-5. 把 MCP Tool / Resource / Prompt 适配到 Nanobot Runtime；
-6. 动态注册到共享 `ToolRegistry`；
-7. 维护连接并在应用关闭时释放资源。
+### 安全
 
-### 工具命名与透明执行
-
-MCP Tool 最终进入与 Native Tool 相同的 `ToolRegistry`。
-
-所以对 `AgentRunner` 来说：
-
-```text
-Native Tool
-MCP Tool
-Plugin-provided Tool
-```
-
-都应该通过同一 model-facing Tool contract 使用。
-
-核心思想是：
-
-> **AgentRunner 面向 Tool contract，不面向 MCP transport。**
-
-### enabledTools：能力过滤
-
-current 配置支持：
-
-```json
-{
-  "enabledTools": ["read_file"]
-}
-```
-
-默认 `["*"]` 表示允许 Server 暴露的全部 capability；设置 allowlist 后，只注册允许的 Tool。current-source 对受限配置下的 Resource / Prompt 暴露也有相应限制。
-
-这不是一个简单 UI 开关，而是最小权限边界：
-
-```text
-Server 能做什么
-      ↓
-enabledTools
-      ↓
-Agent 被授权做什么
-```
-
-### current 配置示例
-
-手动配置路径位于：
-
-```text
-~/.nanobot/config.json
-```
-
-示例：
-
-```json
-{
-  "tools": {
-    "mcpServers": {
-      "filesystem": {
-        "command": "npx",
-        "args": [
-          "-y",
-          "@modelcontextprotocol/server-filesystem",
-          "/path/to/dir"
-        ],
-        "enabledTools": ["read_file"]
-      }
-    }
-  }
-}
-```
-
-此外 WebUI 的 **Apps** 页面可以添加已知 MCP preset 或自定义 stdio / HTTP / SSE / OAuth Server。
-
-### 安全边界
-
-- stdio MCP 会启动本地进程，必须审查 `command` / `args` / `cwd` / `env`；
-- HTTP/SSE MCP 使用 Nanobot 的 SSRF guard；
-- 私有网络地址只应通过窄范围 `tools.ssrfWhitelist` 显式允许；
-- OAuth credential 保存在 Nanobot data directory，而不是直接写入 `config.json`；
-- 不要把 Secret 放在命令行参数中。
+HTTP/SSE MCP 使用 Nanobot 网络安全 guard；访问私有 HTTP endpoint 时必须谨慎配置窄范围 `tools.ssrfWhitelist`。stdio MCP 本质会启动本地进程，需要审查 command/args/env/cwd。
 
 ## 5.9 MCP 生态发展时间线
 
@@ -834,15 +772,21 @@ MCP 生态发展时间线
 > 
 > MCP 是一个 Client-Server 协议，工具的定义和执行都在 MCP Server 中完成，Client 只需要遵循协议就能使用任何 MCP Server 提供的工具。
 > 
-> 在实际的 Agent 框架中（如 Nanobot），两者配合使用：MCP 负责工具的'供给侧'——发现和执行工具；Function Calling 负责'选择侧'——让 LLM 自主选择调用哪个工具。Nanobot 的 MCPProvider 与 ToolRegistry 适配层就是连接两者的桥梁。"
+> 在实际的 Agent 框架中（如 Nanobot），两者配合使用：MCP 负责工具的'供给侧'——发现和执行工具；Function Calling 负责'选择侧'——让 LLM 自主选择调用哪个工具。框架的 MCPToolWrapper 就是连接两者的桥梁。"
 
 ### Q5: Nanobot 是如何集成 MCP 的？
 
-> "2026-09-24 current-source 中，MCP 不再由 AgentLoop 自己管理连接。应用启动层先创建共享 ToolRegistry，再通过 MCPProvider.from_config 读取 config 和 Agent Plugin 中的 MCP Server，await connect() 后完成 capability discovery，并把允许的 Tool 动态注册到这个 Registry。AgentLoop.from_config 接收同一个 Registry，AgentRunner 因此能像执行 Native Tool 一样执行 MCP Tool。应用关闭时由 Composition Root 调用 MCPProvider.aclose()。这个设计把外部连接生命周期与 Agent Turn 解耦，也方便 CLI、Gateway、SDK 复用同一 Core。"
+> "Nanobot 通过 MCPToolWrapper 类集成 MCP。具体流程分两个阶段：
+> 
+> **启动阶段**：框架读取 nanobot.yml 中的 mcp_servers 配置，为每个 MCP Server 建立连接（根据配置选择 stdio 或 HTTP 传输），然后调用 tools/list 获取该 Server 提供的工具列表，为每个工具创建一个 MCPToolWrapper 实例并注册到 ToolRegistry。
+> 
+> **运行阶段**：当 LLM 决定调用某个 MCP 工具时（通过 Function Calling），AgentRunner 像执行普通工具一样调用 MCPToolWrapper.run()，MCPToolWrapper 内部将调用转换为 MCP 的 tools/call 请求发送给 MCP Server，收到结果后返回给 AgentRunner。
+> 
+> 关键设计是 MCPToolWrapper 的 `_normalize_schema_for_openai` 方法，它处理了 MCP JSON Schema 和 OpenAI Function Calling 格式之间的差异，让 MCP 工具对 LLM 来说和内置工具完全透明。"
 
 ### Q6: MCP 的 stdio 和 HTTP 传输有什么区别？
 
-> "stdio 传输用于本地 MCP Server，Host 通过 stdin/stdout 与 Server 进程通信，优点是简单高效、无需单独暴露网络端口；但它会启动本地进程，并不等于获得 OS 沙箱，因此必须审查命令、参数和环境。
+> "stdio 传输用于本地 MCP Server，Host 通过 stdin/stdout 与 Server 进程通信，优点是简单高效、无需网络、天然的进程隔离安全性，缺点是只能本地使用。
 > 
 > HTTP 传输用于远程 MCP Server，Client 通过 HTTP POST 发送请求、通过 SSE（Server-Sent Events）接收流式响应，优点是支持远程部署和共享，缺点是需要网络、需要额外的安全措施。
 > 
@@ -854,189 +798,71 @@ MCP 生态发展时间线
 
 ### 目标
 
-编写一个简单的 MCP Server，提供天气查询功能，然后在 Nanobot 中使用它。
+实现一个最小 MCP Server，并通过 current Nanobot 的 MCPProvider 接入。
 
-### 步骤 1：创建 MCP Server
+### 步骤 1：MCP Server
 
-```python
-# weather_server.py
-# 一个简单的天气查询 MCP Server
+可以继续使用 Python MCP SDK 编写，例如暴露：
 
-import json
-import sys
-from typing import Any
-
-def handle_request(request: dict) -> dict:
-    """处理 MCP 请求。"""
-    method = request.get("method")
-    req_id = request.get("id")
-    
-    if method == "initialize":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "weather-server", "version": "1.0.0"},
-            },
-        }
-    
-    elif method == "tools/list":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "tools": [
-                    {
-                        "name": "get_weather",
-                        "description": "Get current weather for a city",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "city": {
-                                    "type": "string",
-                                    "description": "City name (e.g., Beijing, Shanghai)",
-                                }
-                            },
-                            "required": ["city"],
-                        },
-                    }
-                ]
-            },
-        }
-    
-    elif method == "tools/call":
-        tool_name = request["params"]["name"]
-        args = request["params"].get("arguments", {})
-        
-        if tool_name == "get_weather":
-            city = args.get("city", "Unknown")
-            # 模拟天气数据
-            weather_data = {
-                "Beijing": {"temp": 22, "weather": "晴", "wind": "东北风3级"},
-                "Shanghai": {"temp": 25, "weather": "多云", "wind": "东南风2级"},
-                "Guangzhou": {"temp": 30, "weather": "阵雨", "wind": "南风2级"},
-            }
-            
-            data = weather_data.get(city, {"temp": 20, "weather": "未知", "wind": "未知"})
-            result_text = f"{city}: {data['weather']}, {data['temp']}°C, {data['wind']}"
-            
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "content": [{"type": "text", "text": result_text}]
-                },
-            }
-    
-    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": "Method not found"}}
-
-
-def main():
-    """MCP Server 主循环（stdio 传输）。"""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        
-        try:
-            request = json.loads(line)
-            response = handle_request(request)
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
-        except Exception as e:
-            error_response = {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": str(e)},
-            }
-            sys.stdout.write(json.dumps(error_response) + "\n")
-            sys.stdout.flush()
-
-
-if __name__ == "__main__":
-    main()
+```
+get_weather(city)
 ```
 
-### 步骤 2：在 Nanobot 中配置
+重点不是 API 本身，而是保证 Tool Schema 清楚、返回结构稳定。
 
-current-source 使用 `~/.nanobot/config.json`。例如本地 stdio Server：
+### 步骤 2：current Nanobot 配置
 
-```json
-{
-  "tools": {
-    "mcpServers": {
-      "weather": {
-        "command": "python",
-        "args": ["weather_server.py"],
-        "enabledTools": ["get_weather"]
-      }
-    }
-  }
-}
+current 配置在：
+
+```
+~/.nanobot/config.json
 ```
 
-也可以：
+MCP Server 配置位于：
 
-1. 运行 `nanobot webui`；
-2. 打开 **Apps → MCP**；
-3. 添加 Custom stdio / HTTP / SSE Server；
-4. 只启用任务需要的 Tool；
-5. 保存并按提示重启。
-
-> 💡 建议先在 Nanobot 外单独运行 MCP Server，确认它能启动，再排查 Host 侧集成。
-
-### 步骤 3：测试
-
-启动 Nanobot 后，发送消息 "北京今天天气怎么样？"，Agent 会：
-1. 识别用户意图是查询天气
-2. 调用 `mcp_weather_get_weather(city="Beijing")`
-3. MCPProvider 持有的连接将 Tool Call 通过 stdio 转发到 weather_server.py
-4. 收到结果："Beijing: 晴, 22°C, 东北风3级"
-5. LLM 整理后回复用户
-
-### 使用 MCP SDK（推荐方式）
-
-实际开发中，推荐使用官方 MCP SDK，而不是自己处理 JSON-RPC：
-
-```python
-# 使用 Python MCP SDK
-from mcp.server import Server
-from mcp.types import Tool, TextContent
-
-server = Server("weather-server")
-
-@server.list_tools()
-async def list_tools():
-    return [
-        Tool(
-            name="get_weather",
-            description="Get current weather for a city",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string", "description": "City name"},
-                },
-                "required": ["city"],
-            },
-        )
-    ]
-
-@server.call_tool()
-async def call_tool(name: str, arguments: dict):
-    if name == "get_weather":
-        city = arguments["city"]
-        return [TextContent(type="text", text=f"{city}: 晴, 22°C")]
-    raise ValueError(f"Unknown tool: {name}")
-
-if __name__ == "__main__":
-    import asyncio
-    from mcp.server.stdio import stdio_server
-    asyncio.run(stdio_server(server))
+```
+tools.mcpServers.<name>
 ```
 
----
+建议优先通过 WebUI Apps / MCP 管理界面配置；手工 JSON 时以官方 `docs/configuration.md` 的 current schema 为准。
+
+### 步骤 3：最小权限
+
+不要一开始使用所有能力。练习把：
+
+```
+enabledTools
+```
+
+限制为你刚实现的 Tool，并观察 Agent Tool List。
+
+### 步骤 4：验证连接生命周期
+
+启动：
+
+```bash
+nanobot gateway --verbose
+```
+
+观察：
+
+1. MCPProvider connect
+2. Server capability discovery
+3. ToolRegistry 注册
+4. Agent Tool Call
+5. Tool Result
+6. shutdown 时 connection close
+
+### 步骤 5：故障实验
+
+故意让 Server：
+
+- 启动失败
+- Tool 超时
+- 返回异常
+- 暂时断开
+
+观察 Nanobot 如何报告/reconnect。真正理解 MCP，必须理解 failure path，而不仅是成功 Demo。
 
 ## 5.12 本章总结
 
@@ -1066,7 +892,7 @@ if __name__ == "__main__":
 │  └── Streamable HTTP = 新标准                          │
 │                                                      │
 │  在 Nanobot 中                                        │
-│  ├── MCPProvider 发现能力并注册适配后的 MCP 工具                       │
+│  ├── MCPToolWrapper 包装远程工具                       │
 │  ├── 命名规则: mcp_{server}_{tool}                     │
 │  ├── _normalize_schema_for_openai 格式转换             │
 │  └── 配置驱动的传输选择                                │
@@ -1087,7 +913,7 @@ if __name__ == "__main__":
 - [ ] 能列举三大原语及其控制方
 - [ ] 能对比 MCP 和 Function Calling
 - [ ] 能描述 MCP 在 Nanobot 中的实现
-- [ ] 能解释 MCPProvider、shared ToolRegistry 与 capability adapter 的职责
+- [ ] 能解释 MCPToolWrapper 的作用
 - [ ] 能说出 stdio 和 HTTP 传输的区别
 
 ---
@@ -1096,8 +922,8 @@ if __name__ == "__main__":
 
 理论知识已经足够，接下来让我们动手实践——安装 Nanobot 并创建你的第一个 Agent！
 
-➡️ [06 - 安装与上手](../06-current-source-setup/README.md)
+➡️ [06 - 安装与上手](../06-install-and-hands-on/README.md)
 
 ---
 
-> 📝 **本章小结**：MCP 是 AI 工具生态标准化的里程碑协议。它通过 Host-Client-Server 三角架构和 Tools/Resources/Prompts 三大原语，解决了 AI 应用与工具之间的集成碎片化问题。在 Nanobot 中，MCPProvider + capability adapters + shared ToolRegistry 构成 MCP 与框架工具系统的桥梁。理解 MCP 不仅是面试热点，也是 AI 工程师的必备知识。
+> 📝 **本章小结**：MCP 是 AI 工具生态标准化的里程碑协议。它通过 Host-Client-Server 三角架构和 Tools/Resources/Prompts 三大原语，解决了 AI 应用与工具之间的集成碎片化问题。在 Nanobot 中，MCPToolWrapper 是 MCP 与框架工具系统的桥梁。理解 MCP 不仅是面试热点，也是 AI 工程师的必备知识。
