@@ -1,0 +1,48 @@
+name: package-nanobot-v0.1.4-era
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/package-nanobot-v014-era.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pinned Nanobot source
+        uses: actions/checkout@v4
+        with:
+          repository: HKUDS/nanobot
+          ref: 485c75e065808aa3d27bb35805d782d3365a5794
+          path: nanobot-source
+          fetch-depth: 1
+
+      - name: Verify pinned commit
+        shell: bash
+        run: |
+          test "$(git -C nanobot-source rev-parse HEAD)" = "485c75e065808aa3d27bb35805d782d3365a5794"
+          echo "Pinned source verified: $(git -C nanobot-source rev-parse HEAD)"
+          rm -rf nanobot-source/.git
+
+      - name: Add baseline metadata
+        shell: bash
+        run: |
+          cat > nanobot-source/UPSTREAM_BASELINE.txt <<'EOF'
+          Upstream: https://github.com/HKUDS/nanobot
+          Commit: 485c75e065808aa3d27bb35805d782d3365a5794
+          Era: v0.1.4.post6
+          Purpose: pinned historical baseline for source-level study and secondary development
+          EOF
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanobot-v0.1.4-era-485c75e
+          path: nanobot-source/
+          include-hidden-files: true
+          retention-days: 7
