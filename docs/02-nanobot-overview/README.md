@@ -1,5 +1,7 @@
 # 02 - Nanobot 项目概览
 
+> **2026 current-source 说明**：本章直接沿用原版 learn-nanobot 的章节结构与主体内容；凡涉及 Nanobot 具体源码、配置、路径、记忆、并发、MCP 生命周期等实现细节，均按 HKUDS/nanobot main @ 2026-09-24 (source trace snapshot around 62aa6ba6a33790a656b952ef150517bd70d6eb30) 修订。
+
 > 🎯 **本章目标**：全面了解 HKUDS/nanobot 项目的背景、核心特性、设计理念，以及为什么它是面试学习的最佳选择。
 
 ---
@@ -23,7 +25,7 @@
 
 **HKUDS**（The University of Hong Kong Data Science Lab）是香港大学的数据科学研究实验室，在大模型、推荐系统、图神经网络等方向有深厚的学术积累。
 
-Nanobot 是 HKUDS 在 2026 年 2 月开源的项目，定位为一个**超轻量级 AI Agent 框架**。从发布到现在短短两个月内就获得了 37K+ Stars，增长速度惊人。
+Nanobot 是 HKUDS 在 2026 年 2 月开源的项目，定位为一个**超轻量级 AI Agent 框架**。从发布到现在短短两个月内就获得了 GitHub 社区持续活跃，增长速度惊人。
 
 ### 项目诞生的背景
 
@@ -47,7 +49,7 @@ Nanobot 是 HKUDS 在 2026 年 2 月开源的项目，定位为一个**超轻量
 │  └── 需要一个从设计之初就原生支持 MCP 的框架                   │
 │                                                             │
 │  Nanobot 的解答：                                            │
-│  → 4000 行代码，极简但完整                                   │
+│  → 早期约 4000 行、current-source 已显著扩展代码，极简但完整                                   │
 │  → 原生支持微信/飞书/钉钉等 8+ 平台                          │
 │  → MCP 原生支持，从第一天就内置                               │
 │  → MIT 开源，对所有人免费                                    │
@@ -64,237 +66,194 @@ Nanobot 的定位非常清晰：
 
 ---
 
-## 2.2 为什么仍然适合源码学习
 
-原版教程把 Nanobot 的核心卖点概括为“约 4000 行 Python 代码”。这适用于早期版本，但已经不符合 2026-09-24 的 HKUDS/nanobot main。
+## 2.2 为什么叫"超轻量级"
 
-current-source 已经包含：
+原版教程写作时，“早期版本约 早期约 4000 行、current-source 已显著扩展；current-source 已明显扩展 Python”是 Nanobot 的显著卖点；**到 2026-09-24 的 current-source，这个固定代码量描述已经不成立**。项目已经扩展出 WebUI、Gateway、OpenAI-compatible API、Python SDK、模型预设、MCP、Agent Plugins、Dream、Automations、Project Workspace、安全边界等大量产品级能力。
 
-- CLI / TUI
-- WebUI / WebSocket
-- Gateway
-- OpenAI-compatible API
-- Python SDK
-- Provider Registry / Model Presets
-- AgentLoop / AgentRunner
-- Tool discovery / MCP
-- Agent Plugins v1 / Skills
-- Session / AutoCompact / Consolidation / Dream
-- Subagent / Cron / Local Trigger / Heartbeat
-- 多种 Chat Channels
-- Workspace / Project Scope
-- Sandbox / SSRF / Pairing
-- Hooks / Runtime Events / Usage Tracking
+因此现在更准确的学习定位是：
 
-因此今天选择 Nanobot 学源码，不是因为“全部源码只有几千行”，而是因为它的**核心责任边界仍然清晰**：
+> **Nanobot 仍然强调可读和直接，但应该把它看成一个真实 self-hosted Agent Runtime，而不是一个只有几千行的教学 Demo。**
 
-```
-Channel / Surface
-      ↓
-MessageBus
-      ↓
+### 代码量对比
+
+不再使用固定“早期约 4000 行、current-source 已显著扩展 vs 某框架多少行”的面试话术。更有价值的比较维度是：
+
+| 维度 | Nanobot current-source 的特点 |
+|---|---|
+| 核心运行链 | MessageBus → AgentLoop → AgentRunner → Provider/Tools |
+| 状态 | Session + provider state + consolidation + Dream |
+| 扩展 | Tool discovery、MCP、Skills、Agent Plugins |
+| Surface | CLI、TUI、WebUI、Chat Channels、API、SDK |
+| 运维 | Gateway、Cron、Heartbeat、Dream、Health endpoint |
+| 安全 | Workspace scope、sandbox、SSRF guard、channel access control |
+
+### Current-source 为什么仍适合学习？
+
+不是因为“可以一个周末读完整仓库”，而是因为核心边界依然清楚：
+
+~~~text
 AgentLoop
-      ↓
-Context + Session
-      ↓
 AgentRunner
-      ↔ Provider
-      ↔ Tools
-```
+ContextBuilder
+SessionManager
+ToolRegistry
+MCPProvider
+ChannelManager
+~~~
 
-### current-source 的学习优势
+适合按一条真实消息做 source trace。
 
-1. **核心链路可追踪**：可以沿一条真实消息追到 Provider、Tool 和 Session。
-2. **产品级问题真实存在**：Session FIFO、streaming、recovery、MCP lifecycle、workspace security 都能在源码中看到。
-3. **扩展点清楚**：Provider、Channel、Tool、Skill、Agent Plugin、MCP 各有不同边界。
-4. **可以局部实验**：Context、Tool、Memory、Subagent、MCP 都可以单独验证。
+### 面试中如何解释"超轻量级"
 
-### 面试中如何解释
+推荐说法：
 
-> “我学习的是 Nanobot 2026 current-source，而不是早期几千行版本。我主要沿 MessageBus → AgentLoop → AgentRunner → ToolRegistry → Session 追核心链路，再用 MCP、Dream、Subagent 和 Channel 做扩展实验。它的价值不是代码量小，而是能在一个真实产品化 Runtime 中看清 Agent 各层 ownership。”
+> “Nanobot 早期以极简代码量著称，但 current-source 已经发展成更完整的 Agent Runtime。我学习它的价值不在于背‘早期约 4000 行、current-source 已显著扩展’，而在于它把 Channel、Session、Context、Runner、Tools、MCP、Memory 和 Automation 的责任边界做得比较直接，适合深入追一条真实执行链。”
+
 
 ## 2.3 核心特性详解
 
 ### 特性一：多 Provider + Model Runtime
 
-Provider 元数据集中在 `nanobot/providers/registry.py`，配置在 `nanobot/config/schema.py`。current-source 支持多种 hosted/local/OpenAI-compatible 后端，并针对 Anthropic、Azure OpenAI、AWS Bedrock、OpenAI Codex、GitHub Copilot 等提供专门路径。
+Provider metadata 集中在 `nanobot/providers/registry.py`，配置在 `nanobot/config/schema.py`。current-source 还支持：
+- model presets；
+- per-session model selection；
+- context window runtime；
+- hosted/local/openai-compatible provider path。
 
-模型选择还引入 Model Preset、Provider Snapshot 与 Session 级选择，不再只是一个固定 `provider + model` 字符串。
+不要再背“11+”这种容易过时的固定数量。
 
-### 特性二：多 Surface / 多 Channel
+### 特性二：多 Channel + WebUI
 
-Nanobot 不只支持聊天平台，还提供：
+Channel 将平台事件统一为 `InboundMessage`，再通过 MessageBus 进入 Agent Core。current repository 采用 self-contained channel package/discovery 机制，WebUI/WebSocket 也是重要 Surface。
 
-```
-CLI
-TUI
-WebUI / WebSocket
-Gateway
-OpenAI-compatible API
-Python SDK
-Chat Apps
-```
+平台数量会持续变化，因此面试重点应放在：
 
-current Channel 以自包含 package 形式存在于 `nanobot/channels/<channel>/`，由 `ChannelManager` 负责发现、生命周期和出站路由。
+~~~text
+Platform SDK
+→ Channel Adapter
+→ InboundMessage / OutboundMessage
+→ MessageBus
+→ Agent Core
+~~~
 
-### 特性三：MCP 原生集成
+### 特性三：MCP
 
-MCP current 架构不再是“AgentLoop 自己维护一组 MCP wrapper”。应用组合层创建共享 `ToolRegistry` 和 `MCPProvider`：
+current MCP 是 application-owned infrastructure：
+- composition root 创建 `MCPProvider`；
+- 与 `AgentLoop` 共享 `ToolRegistry`；
+- 在使用前 `connect()`；
+- shutdown 时 `aclose()`。
 
-```
-MCPProvider
-    ↓ dynamic registration
-ToolRegistry
-    ↑
-AgentLoop / AgentRunner
-```
+MCP Tool 最终被适配成统一 Tool Registry 中的能力，因此 AgentRunner 不需要区分它来自 native tool 还是 MCP。
 
-MCPProvider 负责 connect/reconnect/close；AgentRunner 只看到统一 Tool。
+### 特性四：Memory System 2.0
 
-### 特性四：Session + Memory 2.0
+不再是旧版 Session + memory/history.jsonl + Dream-managed durable memory 双层模型：
 
-旧版“MEMORY.md + HISTORY.md 双层记忆”已经升级为：
-
-```
+~~~text
 Session JSONL
-  ↓
-AutoCompact / Consolidator
-  ↓
-memory/history.jsonl
-  ↓
-Dream
-  ↓
-SOUL.md / USER.md / memory/MEMORY.md
-```
-
-`HISTORY.md` 主要保留为 legacy migration 输入。
+→ AutoCompact / Consolidator
+→ memory/history.jsonl
+→ Dream
+→ SOUL.md / USER.md / memory/MEMORY.md
+~~~
 
 ### 特性五：Skills + Agent Plugins
 
-SkillsLoader 当前支持：
+SkillsLoader 支持：
+- workspace skills；
+- enabled Agent Plugin skills；
+- built-in skills；
+- requirements 检查；
+- progressive loading；
+- 显式 `$skill-name` invocation；
+- always skill。
 
-```
-Workspace Skills
-→ Enabled Agent Plugin Skills
-→ Built-in Skills
-```
-
-并采用 progressive loading：先向模型暴露 Skill 摘要，需要时再读取完整 SKILL.md。Agent Plugin v1 可以把 Skill 与 MCP Server 打包成一个可安装、验证、显式启用的 capability package。
+Agent Plugin 可把 Skill 与 MCP server 打包，并有 manifest validation、enable state、package fingerprint 等安全机制。
 
 ### 特性六：Subagent + Automations
 
-current-source 包含：
+SubagentManager 支持 background / inline execution，并复用 AgentRunner。其迭代上限跟 current runtime limits 对齐，不再是“主 40、子 15”的固定旧设计。
 
-- SubagentManager：后台与 inline 子 Agent
-- CronService：定时任务
-- Local Trigger：外部本地事件触发
-- Heartbeat：Gateway 注册的受保护 Cron Job，读取 `HEARTBEAT.md`
-- Dream：长期记忆系统任务
+Automation 包括：
+- user-created Cron scheduled turn；
+- local trigger；
+- cron-backed protected Heartbeat system job；
+- Dream schedule。
 
-Subagent 的并发由 `agents.defaults.maxConcurrentSubagents` 控制（current default 4）；Inbound Turn 的全局并发则由 `NANOBOT_MAX_CONCURRENT_REQUESTS` 独立控制。
+Gateway 是这些长期后台服务的重要宿主。
 
-### 特性七：安全与可观察性
-
-current-source 还包含：
-
-- `tools.restrictToWorkspace`
-- `tools.exec.sandbox`（Linux bwrap / macOS seatbelt）
-- SSRF guard / whitelist
-- Channel pairing / allowFrom
-- Turn stage timing
-- Agent hooks / typed runtime events
-- usage tracking
-- recovery checkpoints
 
 ## 2.4 项目数据与里程碑
 
-> 本仓库固定以 **2026-09-24 的 HKUDS/nanobot main** 作为学习基线。Stars、Forks、Contributors 等社区数字会持续变化，不再把它们写成“固定架构事实”。
+原版中的 Stars 数、平台数量、Provider 数量都属于高度易变数据，本仓库不再把固定数字写成学习结论。
 
-### 2026-09-24 学习快照的关键里程碑
+### 2026-09-24 学习快照下的重要变化
 
-| 维度 | current-source 状态 |
-|---|---|
-| 核心执行 | AgentLoop + AgentRunner 分层 |
-| 用户入口 | CLI / TUI / WebUI / Gateway / API / SDK |
-| Tool | Native Tools + MCP + Plugin Entry Points |
-| Memory | Session + AutoCompact + Consolidation + Dream |
-| 扩展 | Provider / Channel / Tool / Skill / Agent Plugin |
-| Automation | Cron / Local Trigger / Heartbeat / Dream |
-| 安全 | Workspace Guard / Exec Sandbox / SSRF / Pairing |
-| WebUI | Conversation、Workspace、Model、Settings、Apps/Channels 管理 |
+相较早期版本，current-source 已具备：
+1. Packaged WebUI / WebSocket 与项目工作区；
+2. Python SDK 与 OpenAI-compatible API；
+3. 更完整的 Session durability / recovery / provider state；
+4. AutoCompact + Dream 双阶段长期记忆；
+5. Agent Plugins v1 与 CLI Apps；
+6. richer channel packages；
+7. Cron / Local Trigger / Heartbeat / Dream 等 background runtime；
+8. Workspace scope、SSRF、sandbox 等更系统的安全边界。
 
-### 为什么版本快照重要
+真正需要记录的是 **Git SHA + 学习日期**，而不是固定 Stars。
 
-Agent 项目变化快。如果面试时继续背：
-
-```
-4000 行
-8 个平台
-11 个 Provider
-MEMORY.md + HISTORY.md
-固定 Semaphore(3)
-```
-
-这些曾经正确的细节会变成错误答案。
-
-更好的做法是：
-
-```
-先说稳定架构边界
-→ 再说明自己学习的 commit / 日期
-→ 对会变化的数字只给“当前快照”
-```
 
 ## 2.5 为什么选 Nanobot 学习
 
 ### 面试价值分析
 
-| 维度 | Nanobot 的优势 | 其他框架的问题 |
-|------|---------------|---------------|
-| **源码可读性** | 核心链路清晰，可按调用链深入阅读 | 数万行甚至数十万行，根本读不完 |
-| **架构理解** | 五层架构清晰明了 | 抽象层过多，难以把握全局 |
-| **设计模式** | 10+ 经典设计模式可讲 | 模式混杂，难以提炼 |
-| **技术热点** | MCP原生支持（面试热门话题）| 后来追加，理解不深 |
-| **项目热度** | 37K Stars，面试官大概率听过 | 需要额外解释项目背景 |
-| **差异化** | 很少有人深入研究Nanobot | 人人都说学过LangChain |
-| **实战性** | 可以快速搭建真实的Agent | 搭建过程复杂，Demo效果一般 |
+current-source 的学习价值更偏向“真实 Agent Runtime 工程”：
+
+~~~text
+Message transport
++ Session durability
++ Context construction
++ Provider/tool execution
++ MCP lifecycle
++ Skill/Plugin packaging
++ Automations
++ Security boundaries
++ Observability
+~~~
+
+这些问题与后端工程高度相通：接口边界、资源生命周期、并发控制、持久化、重试、权限、可观测性。
 
 ### "以小见大"的学习策略
 
-```
-通过 Nanobot current-source 的核心链路，你可以理解：
+“以小见大”仍然成立，但方式要改：
 
-Agent 核心概念
-├── AgentLoop → 理解 Agent 的推理循环
-├── Memory → 理解 Agent 的记忆管理
-├── Tools → 理解 Agent 的工具调用
-└── MCP → 理解工具标准化协议
+~~~text
+旧：因为整个仓库只有几千行，所以全部读完
+新：选择一个真实数据流，沿边界追到底
+~~~
 
-软件工程思想
-├── 异步编程 → asyncio 实战
-├── 设计模式 → 适配器、注册表、生产者-消费者等
-├── 配置驱动 → YAML 组装系统
-└── 关注点分离 → 层次清晰的模块化设计
+推荐 source trace：
 
-系统设计能力
-├── 消息队列 → MessageBus 双队列设计
-├── 并发控制 → 会话锁 + 并发闸门
-├── 插件系统 → Skill/MCP 热加载
-└── 多平台适配 → 适配器模式
-```
+~~~text
+InboundMessage
+→ per-session queue
+→ TurnContext
+→ restore/build/run/save
+→ AgentRunSpec
+→ AgentRunner
+→ ToolRegistry
+→ SessionManager
+~~~
 
 ### 与 LangChain 学习路径对比
 
-| 阶段 | 学习 Nanobot | 学习 LangChain |
-|------|-------------|---------------|
-| 入门 | 1天：跑通示例，理解配置 | 3天：理解概念，跑通示例 |
-| 架构 | 2天：通读源码，理解架构 | 2周：部分模块源码，理解抽象层 |
-| 深入 | 3天：掌握设计模式和关键实现 | 1月：深入部分模块，仍有盲区 |
-| 面试 | 1周内可完成面试准备 | 需要数周，且难以讲清全局 |
+不必把两个项目做“谁更好”的结论。对求职学习而言：
+- Nanobot：适合看一套可运行产品的内部边界；
+- LangChain/LangGraph：适合熟悉更广泛生态和图式工作流；
+- OpenAI Agents SDK 等：适合学习不同的 runtime abstraction。
 
-**结论**：Nanobot 让你在一周内就能达到面试中"项目深度"的要求，而且因为读过全部源码，面试时任何关于架构设计的追问都能从容回答。
-
----
+你需要的是可迁移的 Agent Runtime 思维，而不是绑定单一框架 API。
 
 ## 2.6 与其他框架的差异化对比
 
@@ -344,7 +303,7 @@ AutoGPT：追求"完全自主"
 └── 更像一个概念验证（PoC）
 
 Nanobot：追求"实用可靠"
-├── 明确的迭代限制（40次/15次）防止无限循环
+├── 明确的迭代限制（current runtime/config 限制）防止无限循环
 ├── workspace 沙箱保证安全
 └── 更像一个生产就绪的工具
 ```
@@ -369,17 +328,17 @@ Nanobot：以单 Agent 为核心
 
 ### 话术一：介绍你学的 Nanobot 项目
 
-> "我深入学习了 HKUDS/nanobot 这个项目，它是香港大学数据科学实验室开源的超轻量级 AI Agent 框架，它已经是一套包含 CLI/WebUI/Gateway/API/SDK、多 Provider、MCP、Session/Dream、Skills/Plugins 与多平台 Channel 的 Agent Runtime。
+> "我深入学习了 HKUDS/nanobot 这个项目，它是香港大学数据科学实验室开源的超轻量级 AI Agent 框架，GitHub 上有 GitHub 社区持续活跃。这个项目最大的特点是只用了早期版本约 早期约 4000 行、current-source 已显著扩展；current-source 已明显扩展 Python 代码，就实现了一个完整的 Agent 框架，包括消息总线、AgentLoop 推理循环、MCP 协议支持、双层记忆系统、技能加载系统，以及 8 个以上聊天平台的适配。
 > 
-> 我按真实调用链重点研究了三个方面：一是 AgentLoop 的 Turn Pipeline 与 AgentRunner 的 Provider/Tool Loop；二是 shared ToolRegistry + application-owned MCPProvider 的生命周期；三是 Session、AutoCompact、Consolidation 与 Dream 组成的新版 Memory System。"
+> 我通读了它的全部源码，重点研究了三个方面：一是 AgentLoop 的 ReAct 循环实现，包括会话锁和并发控制；二是 MCP 协议在框架中的集成方式，理解了 MCPToolWrapper 如何将远程 MCP 工具包装为本地工具；三是双层记忆系统的设计，特别是 Dream / MemoryStore 虚拟工具和 Consolidator 的压缩机制。"
 
 ### 话术二：为什么选这个项目而不是 LangChain
 
-> "我选择 Nanobot 而不是 LangChain，主要考虑了三点。第一，深度胜过广度——Nanobot 的核心运行时边界足够清晰，我可以沿一条真实消息追完整个执行链并验证关键设计决策，这在面试中意味着任何追问我都能回答；第二，Nanobot 的架构更纯粹，它把 Agent 的核心概念——循环推理、记忆管理、工具调用——用最简洁的方式实现了，没有 LangChain 那种过度封装的问题；第三，它原生支持 MCP 协议，这是目前 AI 工具调用的标准化方向，面试中可以展示我对技术趋势的把握。"
+> "我选择 Nanobot 而不是 LangChain，主要考虑了三点。第一，深度胜过广度——Nanobot 只有 早期约 4000 行、current-source 已显著扩展代码，我可以读完全部源码并理解每一个设计决策，这在面试中意味着任何追问我都能回答；第二，Nanobot 的架构更纯粹，它把 Agent 的核心概念——循环推理、记忆管理、工具调用——用最简洁的方式实现了，没有 LangChain 那种过度封装的问题；第三，它原生支持 MCP 协议，这是目前 AI 工具调用的标准化方向，面试中可以展示我对技术趋势的把握。"
 
 ### 话术三：Nanobot 最大的技术亮点是什么
 
-> "我认为 Nanobot 最大的技术亮点是它的'配置驱动 + LLM 自主规划'的设计哲学。很多 Agent 框架花大量代码去实现复杂的任务编排引擎、状态机、DAG 执行器。但 Nanobot 的核心洞察是：LLM 本身就是最好的规划器。所以 Nanobot 只需要实现一个简洁的 ReAct 循环（AgentRunner），让 LLM 自己决定调用什么工具、什么顺序、什么时候结束。这种设计让 4000 行代码就能实现其他框架数十万行才能做到的功能。"
+> "我认为 Nanobot 最大的技术亮点是它的'配置驱动 + LLM 自主规划'的设计哲学。很多 Agent 框架花大量代码去实现复杂的任务编排引擎、状态机、DAG 执行器。但 Nanobot 的核心洞察是：LLM 本身就是最好的规划器。所以 Nanobot 只需要实现一个简洁的 ReAct 循环（AgentRunner），让 LLM 自己决定调用什么工具、什么顺序、什么时候结束。这种设计让 早期约 4000 行、current-source 已显著扩展代码就能实现其他框架数十万行才能做到的功能。"
 
 ---
 
@@ -392,7 +351,7 @@ Nanobot：以单 Agent 为核心
 │                   本章核心要点                        │
 │                                                     │
 │  1. Nanobot 是 HKUDS 开源的超轻量级 Agent 框架      │
-│     → 4000行代码 | 37K+ Stars | MIT 协议             │
+│     → 早期约 4000 行、current-source 已显著扩展代码 | GitHub 社区持续活跃 | MIT 协议             │
 │                                                     │
 │  2. 六大核心特性                                     │
 │     → 11+ LLM 供应商                                │
@@ -432,4 +391,4 @@ Nanobot：以单 Agent 为核心
 
 ---
 
-> 📝 **本章小结**：Nanobot 是一个"极简但完整"的 AI Agent 框架。它用 4000 行代码证明了：好的架构设计不在于代码多少，而在于是否抓住了问题的本质。对面试者而言，Nanobot 是一个"以小见大"的完美学习素材。
+> 📝 **本章小结**：Nanobot 是一个"极简但完整"的 AI Agent 框架。它用 早期约 4000 行、current-source 已显著扩展代码证明了：好的架构设计不在于代码多少，而在于是否抓住了问题的本质。对面试者而言，Nanobot 是一个"以小见大"的完美学习素材。
