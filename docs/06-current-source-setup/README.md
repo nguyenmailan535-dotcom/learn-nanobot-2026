@@ -39,442 +39,326 @@
 
 ### 6.2.1 系统要求
 
-| 项目 | 最低要求 | 推荐配置 |
-|------|---------|---------|
-| 操作系统 | macOS / Linux / Windows (WSL) | macOS / Ubuntu 22.04+ |
-| Python | 3.10+ | 3.11 或 3.12 |
-| 内存 | 4 GB | 8 GB+ |
-| 磁盘空间 | 500 MB | 2 GB+ |
-| 网络 | 可访问 LLM API | 稳定的国际网络 |
+以 2026-09-24 current-source README 为准：
+
+| 项目 | 要求 |
+|---|---|
+| Python | **3.11+** |
+| 操作系统 | macOS / Linux / Windows |
+| Git | Source install 需要 |
+| Bun | Source checkout 的前端/TUI开发流程需要；发布 wheel 已包含 WebUI |
+| LLM Credential | 至少一个可用 Provider/Model |
+
+```powershell
+python --version
+git --version
+bun --version
+```
 
 ### 6.2.2 Python 环境配置
 
-**方式一：使用系统 Python（简单）**
-
-```bash
-# 检查 Python 版本
-python3 --version
-# 输出应为 Python 3.10.x 或更高
-
-# 如果版本过低，使用 pyenv 安装
-curl https://pyenv.run | bash
-pyenv install 3.12.0
-pyenv global 3.12.0
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
 ```
 
-**方式二：使用 Conda（推荐隔离环境）**
+Linux/macOS：
 
 ```bash
-# 创建独立环境
-conda create -n nanobot python=3.12 -y
-conda activate nanobot
-
-# 验证
-python --version
-# Python 3.12.x
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
 ```
-
-**方式三：使用 uv（最快，推荐）**
-
-```bash
-# 安装 uv（Rust 编写的超快 Python 包管理器）
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 验证
-uv --version
-```
-
-> 💡 **面试加分**：uv 是 Astral 公司用 Rust 编写的 Python 包管理工具，安装速度比 pip 快 10-100 倍。Nanobot 官方推荐使用 uv。
 
 ### 6.2.3 LLM API Key 准备
 
-Nanobot 需要连接大语言模型 API，支持多种 Provider：
+Credential 建议放环境变量。current `config.json` 的字符串值支持 `${VAR_NAME}`：
 
-| Provider | 获取方式 | 推荐度 |
-|----------|---------|--------|
-| OpenAI | [platform.openai.com](https://platform.openai.com) | 首选 |
-| Anthropic (Claude) | [console.anthropic.com](https://console.anthropic.com) | 推荐 |
-| DeepSeek | [platform.deepseek.com](https://platform.deepseek.com) | 国内友好 |
-| OpenRouter | [openrouter.ai](https://openrouter.ai) | 聚合多模型 |
-| 本地模型 (Ollama) | [ollama.com](https://ollama.com) | 免费、离线 |
-
-```bash
-# 准备好你的 API Key
-export OPENAI_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-
-# 或者使用 DeepSeek（国内推荐）
-export DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+```json
+{
+  "providers": {
+    "groq": {
+      "apiKey": "${GROQ_API_KEY}"
+    }
+  }
+}
 ```
 
----
+启动时会在内存中解析，解析后的 Secret 不会写回配置文件。
 
 ## 6.3 安装 Nanobot
 
 ### 6.3.1 方式一：pip 安装（通用）
 
 ```bash
-# 安装最新版
-pip install nanobot-ai
-
-# 验证安装
+python -m pip install nanobot-ai
 nanobot --version
-
-# 查看帮助
-nanobot --help
 ```
 
-### 6.3.2 方式二：uv 工具安装（推荐）
+### 6.3.2 方式二：uv 工具安装
 
 ```bash
-# 使用 uv 安装为全局工具
 uv tool install nanobot-ai
-
-# 验证
 nanobot --version
 ```
 
-> **uv tool install vs pip install 的区别**：
-> - `uv tool install` 会创建独立的虚拟环境，不污染全局 Python 环境
-> - `pip install` 直接安装到当前 Python 环境
-> - 推荐使用 uv，尤其是需要在多个项目中使用不同版本时
+### 6.3.3 方式三：从源码安装（本教程推荐）
 
-### 6.3.3 方式三：从源码安装（开发者）
+本教程学习的是 2026-09-24 的 current-source：
 
 ```bash
-# 克隆源码
 git clone https://github.com/HKUDS/nanobot.git
 cd nanobot
-
-# 使用 uv 安装开发依赖
-uv sync --dev
-
-# 或使用 pip
-pip install -e ".[dev]"
+python -m venv .venv
+# Windows:
+.\.venv\Scripts\Activate.ps1
+# Linux/macOS:
+# source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e .
 ```
+
+editable install 让 checkout 中源码修改直接被当前环境使用，适合下断点和跑测试。
 
 ### 6.3.4 安装后验证
 
 ```bash
-# 验证命令是否可用
-which nanobot
-
-# 查看版本
 nanobot --version
-
-# 查看所有子命令
+nanobot status
 nanobot --help
+git rev-parse HEAD
 ```
 
-预期输出类似：
-
-```
-Usage: nanobot [OPTIONS] COMMAND [ARGS]...
-
-Options:
-  --version  Show version and exit.
-  --help     Show this message and exit.
-
-Commands:
-  onboard   Interactive setup wizard
-  ...
-```
-
----
+遇到教程与行为不一致，先比较版本和 commit。
 
 ## 6.4 配置向导 nanobot onboard
 
 ### 6.4.1 运行配置向导
 
-Nanobot 提供了一个交互式配置向导，帮助你快速完成初始配置：
+current-source 仍支持：
 
 ```bash
-# 在你想要作为 workspace 的目录下运行
-mkdir my-agent && cd my-agent
-nanobot onboard
+nanobot onboard --wizard
 ```
+
+本地桌面首次使用也可以直接：
+
+```bash
+nanobot webui
+```
+
+然后在 **Settings → Models** 配置首个 Provider / Model。
 
 ### 6.4.2 向导流程详解
 
-配置向导会依次引导你完成以下步骤：
+核心是生成或更新：
 
+```text
+~/.nanobot/config.json
 ```
-Step 1: 选择 LLM Provider
-  → OpenAI / Anthropic / DeepSeek / OpenRouter / Custom
 
-Step 2: 输入 API Key
-  → 输入你的 API Key（会被安全存储）
-
-Step 3: 选择默认模型
-  → gpt-4o / claude-sonnet-4-20250514 / deepseek-chat / ...
-
-Step 4: 配置 Workspace
-  → 当前目录 / 自定义目录
-
-Step 5: 生成配置文件
-  → 自动创建 config.json
-```
+通常需要确定 Provider、Model/Model Preset、Credential、Workspace，以及可选的 Channel/MCP/Security 配置。
 
 ### 6.4.3 向导生成的文件
 
-运行完 `nanobot onboard` 后，你会得到：
+默认 Agent Workspace：
 
-```
-my-agent/
-├── config.json          # 主配置文件
-├── AGENTS.md            # Agent 身份定义（可能自动生成）
-└── memory/              # 记忆存储目录
-    └── MEMORY.md        # 长期记忆文件
+```text
+~/.nanobot/workspace/
+├── AGENTS.md
+├── SOUL.md
+├── USER.md
+├── HEARTBEAT.md
+├── memory/
+├── skills/
+├── plugins/
+└── cron/
 ```
 
----
+Session 默认在 Runtime data directory 的：
+
+```text
+sessions/<workspace-id>/*.jsonl
+```
+
+而不是简单放在 Workspace 根目录。
 
 ## 6.5 config.json 配置详解
 
-这是 Nanobot 最核心的配置文件，理解每个字段对面试至关重要。
+### 6.5.1 current 配置结构
 
-### 6.5.1 完整配置示例
+current-source 使用 **JSON + Pydantic Schema**。主要区域：
+
+```text
+agents.defaults
+modelPresets
+providers
+channels
+tools
+gateway
+transcription
+```
+
+简化示例：
 
 ```json
 {
   "agents": {
     "defaults": {
-      "workspace": ".",
-      "model": "gpt-4o",
-      "provider": "openai",
-      "max_tokens": 16384,
-      "context_window_tokens": 128000,
-      "temperature": 0.7,
-      "max_tool_iterations": 40
+      "workspace": "~/.nanobot/workspace",
+      "modelPreset": "primary"
     }
   },
   "providers": {
-    "openai": {
-      "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxx",
-      "api_base": "https://api.openai.com/v1"
-    },
-    "deepseek": {
-      "api_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxx",
-      "api_base": "https://api.deepseek.com"
-    },
-    "ollama": {
-      "api_key": "ollama",
-      "api_base": "http://localhost:11434/v1"
+    "groq": {
+      "apiKey": "${GROQ_API_KEY}"
     }
   },
-  "channels": {
-    "telegram": {
-      "bot_token": "123456:ABC-DEF..."
+  "modelPresets": {
+    "primary": {
+      "provider": "groq",
+      "model": "YOUR_MODEL"
     }
   },
   "tools": {
-    "web_search": {
-      "provider": "brave",
-      "api_key": "BSA..."
-    }
+    "restrictToWorkspace": true
   }
 }
 ```
+
+具体 Provider/Model 名以当前 catalog 和账号为准。
 
 ### 6.5.2 agents.defaults 字段详解
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `workspace` | string | `"."` | Agent 的工作目录，所有文件操作基于此路径 |
-| `model` | string | `"gpt-4o"` | 使用的 LLM 模型标识 |
-| `provider` | string | `"openai"` | LLM 服务提供商，对应 providers 中的 key |
-| `max_tokens` | int | `16384` | 单次 LLM 回复的最大 token 数 |
-| `context_window_tokens` | int | `128000` | 上下文窗口大小，直接影响记忆压缩触发时机 |
-| `temperature` | float | `0.7` | 生成随机性，0=确定性，1=高随机性 |
-| `max_tool_iterations` | int | `40` | 单次对话中工具调用的最大迭代次数 |
+current snapshot 中值得记住：
 
-**关键理解**：
-
-```
-context_window_tokens 的作用：
-┌──────────────────────────────────────────────────┐
-│              context_window_tokens = 128000       │
-│  ┌──────────┐ ┌──────────┐ ┌─────────────────┐   │
-│  │ System   │ │ Memory   │ │ Conversation    │   │
-│  │ Prompt   │ │ MEMORY.md│ │ History         │   │
-│  │ ~2000    │ │ ~1000    │ │ 不断增长...      │   │
-│  └──────────┘ └──────────┘ └─────────────────┘   │
-│                                                   │
-│  当总 token 数接近 128000 时 → 触发记忆压缩        │
-└──────────────────────────────────────────────────┘
-```
-
-> 💡 **面试要点**：`context_window_tokens` 不是越大越好。设置过大会导致：
-> 1. 记忆压缩不触发，旧对话堆积导致 API 费用暴增
-> 2. 模型注意力分散，回答质量下降
-> 3. 超过模型实际支持的窗口会直接报错
+| 字段 | 默认值/含义 |
+|---|---|
+| `contextWindowTokens` | 200000 |
+| `temperature` | 0.1 |
+| `maxToolIterations` | 200 |
+| `maxConcurrentSubagents` | 4 |
+| `maxToolResultChars` | 16000 |
+| `providerRetryMode` | standard |
+| `idleCompactAfterMinutes` | 15 分钟 |
+| `idleCompactCheckIntervalSeconds` | 60 秒 |
+| `unifiedSession` | 是否跨 Channel 共用 Session |
+| `disabledSkills` | 禁用 Skill |
+| `dream` | Dream 长期记忆配置 |
 
 ### 6.5.3 providers 配置
 
-providers 定义了 LLM 服务的连接信息：
-
-```json
-{
-  "providers": {
-    "openai": {
-      "api_key": "sk-xxx",         // API 密钥
-      "api_base": "https://api.openai.com/v1"  // API 端点
-    }
-  }
-}
-```
-
-**多 Provider 场景**：
-
-```json
-{
-  "providers": {
-    "openai": {
-      "api_key": "sk-xxx",
-      "api_base": "https://api.openai.com/v1"
-    },
-    "deepseek": {
-      "api_key": "sk-yyy",
-      "api_base": "https://api.deepseek.com"
-    },
-    "local": {
-      "api_key": "not-needed",
-      "api_base": "http://localhost:11434/v1"
-    }
-  }
-}
-```
-
-**使用国内代理**：
-
-```json
-{
-  "providers": {
-    "openai-proxy": {
-      "api_key": "sk-xxx",
-      "api_base": "https://your-proxy.com/v1"
-    }
-  }
-}
-```
+Provider Credential 与 `modelPresets` 分离，使一个 Provider 可服务多个模型配置，并允许 Session 选择不同 Preset。
 
 ### 6.5.4 channels 配置
 
-channels 定义了消息通道（平台接入），详见 [09 - 多平台接入](../09-multi-platform/README.md)：
-
-```json
-{
-  "channels": {
-    "telegram": {
-      "bot_token": "123456:ABC..."
-    },
-    "discord": {
-      "bot_token": "MTIz..."
-    },
-    "feishu": {
-      "app_id": "cli_xxx",
-      "app_secret": "xxx"
-    }
-  }
-}
-```
+生产使用除 Token/Secret 外，还要关注 `allowFrom` / pairing、group policy、streaming 等访问控制。
 
 ### 6.5.5 tools 配置
 
-tools 部分配置工具相关的参数：
+重点字段：
+
+```text
+tools.restrictToWorkspace
+tools.exec.enable
+tools.exec.sandbox
+tools.ssrfWhitelist
+tools.mcpServers
+tools.web
+```
+
+MCP 示例：
 
 ```json
 {
   "tools": {
-    "web_search": {
-      "provider": "brave",
-      "api_key": "BSAxxxxxxxx"
-    },
-    "exec": {
-      "allowed": true
+    "mcpServers": {
+      "filesystem": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/safe/path"],
+        "enabledTools": ["read_file"]
+      }
     }
   }
 }
 ```
 
-### 6.5.6 配置文件查找顺序
+### 6.5.6 配置文件查找与环境变量
 
-Nanobot 按以下优先级查找配置：
+默认配置是 `~/.nanobot/config.json`。字符串值可使用 `${VAR_NAME}`；缺失变量会 fail fast 并指出具体字段。
 
-```
-1. 命令行参数指定  （最高优先级）
-2. 当前目录 config.json
-3. ~/.config/nanobot/config.json
-4. 环境变量
-5. 内置默认值      （最低优先级）
-```
-
----
+多实例使用不同 Config / Workspace / Port，参见 current `docs/multiple-instances.md`。
 
 ## 6.6 第一次运行：交互模式
 
 ### 6.6.1 启动 Agent
 
-```bash
-# 在配置好的 workspace 目录下
-cd my-agent
+Native Terminal：
 
-# 直接运行（进入交互模式）
+```bash
 nanobot
+```
+
+兼容形式：
+
+```bash
+nanobot agent
+```
+
+One-shot：
+
+```bash
+nanobot agent -m "Reply only with setup-ok"
+```
+
+WebUI：
+
+```bash
+nanobot webui
+```
+
+长期 Gateway：
+
+```bash
+nanobot gateway --background
+nanobot gateway status
+nanobot gateway logs
+nanobot gateway restart
+nanobot gateway stop
 ```
 
 ### 6.6.2 交互界面
 
-启动后你会看到一个交互式命令行界面：
-
-```
-🤖 Nanobot v0.x.x
-📂 Workspace: /Users/you/my-agent
-🧠 Model: gpt-4o (openai)
-
-You: 你好，请介绍一下你自己
-
-Agent: 你好！我是一个 AI 助手，运行在 Nanobot 框架上...
-
-You: 帮我创建一个 hello.py 文件
-
-Agent: 好的，我来帮你创建文件。
-[调用工具: write_file]
-[文件已创建: hello.py]
-
-You: /quit
-```
+WebUI 还提供 persistent topics、temporary chats、Workspace、Models、Apps/MCP、Skills、Automations 与 Settings。
 
 ### 6.6.3 常用交互命令
 
-| 命令 | 说明 |
-|------|------|
-| 直接输入 | 与 Agent 对话 |
-| `/quit` 或 `Ctrl+C` | 退出交互模式 |
-| 多行输入 | 部分终端支持 Shift+Enter |
+以 current `docs/chat-commands.md` 为准。源码学习建议重点试：
+
+```text
+/model
+/skill
+/compact
+/dream
+/dream-log
+/trigger
+/pairing
+```
 
 ### 6.6.4 观察 Agent 的行为
 
-运行后，注意观察以下几点（这些都是面试可以聊的素材）：
+至少观察：
 
-1. **System Prompt 加载**：Agent 启动时读取 AGENTS.md、MEMORY.md 等文件构建系统提示词
-2. **工具调用**：当你让 Agent 操作文件时，可以看到它调用了哪些工具
-3. **记忆保存**：退出时观察 memory/ 目录的变化
-4. **会话历史**：sessions/ 目录下会生成 JSONL 格式的会话记录
-
-```bash
-# 运行后查看生成的文件
-tree my-agent/
-# my-agent/
-# ├── config.json
-# ├── AGENTS.md
-# ├── memory/
-# │   ├── MEMORY.md
-# │   └── HISTORY.md
-# └── sessions/
-#     └── cli:default.jsonl
+```text
+Session JSONL
+Tool Call / Tool Result
+Turn Stage Log
+effective Workspace
+selected Model / Preset
 ```
 
----
+打开 verbose Gateway 时，还能观察 Channel/MCP 的启动和 Tool Registration。
 
 ## 6.7 自定义 AGENTS.md：定义 Agent 身份
 
@@ -550,84 +434,39 @@ System Prompt 构建过程：
 
 ## 6.8 引导文件体系
 
-Nanobot 通过一组 Markdown 文件来引导 Agent 的行为，这是其"Markdown 即配置"理念的体现。
-
 ### 6.8.1 SOUL.md —— 全局人格
 
-```markdown
-# SOUL.md 示例
-
-你是一个友好、专业、有耐心的 AI 助手。
-
-## 价值观
-- 诚实：不确定时承认不知道
-- 安全：不执行可能造成损害的操作
-- 隐私：尊重用户的隐私数据
-
-## 沟通风格
-- 使用简体中文
-- 语气专业但不刻板
-- 适当使用例子帮助理解
-```
-
-**SOUL.md 的特点**：
-- 存放位置：workspace 根目录
-- 注入时机：始终注入 System Prompt
-- 作用范围：影响 Agent 的整体人格和价值观
-- 优先级：高于 AGENTS.md
+`SOUL.md` 属于 Agent Workspace，是 current `ContextBuilder.BOOTSTRAP_FILES` 之一。适合保存稳定人格、沟通风格、长期行为规则；Dream 可以更新它。
 
 ### 6.8.2 USER.md —— 用户画像
 
-```markdown
-# USER.md 示例
+`USER.md` 记录跨 Session 稳定的用户信息和偏好，也属于 Agent Workspace。
 
-## 用户信息
-- 名称：小明
-- 角色：初级后端开发工程师
-- 技术栈：Python, FastAPI, PostgreSQL
-- 目标：准备 AI Agent 方向的面试
+### 6.8.3 TOOLS.md —— current-source 中不再是固定 Bootstrap
 
-## 偏好
-- 喜欢看代码示例
-- 偏好简体中文
-- 需要详细解释概念
+旧教程把 `TOOLS.md` 当作固定引导文件。current-source 的定义是：
+
+```python
+BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md"]
 ```
 
-**USER.md 的作用**：
-- 帮助 Agent 了解用户背景，提供个性化回答
-- 用户可以随时修改，Agent 会感知变化
-- 减少每次对话中重复描述自己的需求
+Tool 能力主要来自 ToolLoader/ToolRegistry、Tool Schema、Skills、MCP 和 Agent Plugins。
 
-### 6.8.3 TOOLS.md —— 工具使用指引
-
-```markdown
-# TOOLS.md 示例
-
-## 文件操作规范
-- 创建文件前先用 list_dir 检查目录结构
-- 修改文件时优先使用 edit_file 而非 write_file
-- 重要文件修改前先备份
-
-## Shell 命令规范
-- 避免使用 rm -rf
-- 长时间运行的命令使用后台模式
-- 安装包时使用 --yes 避免交互确认
-
-## 搜索规范
-- 优先使用 web_search 获取最新信息
-- 搜索结果需要验证可靠性
-```
+如果自行创建 `TOOLS.md`，不要假设它会自动进入每轮 Context，除非通过其他机制显式加载。
 
 ### 6.8.4 文件优先级与覆盖关系
 
-```
-优先级从高到低：
-SOUL.md  >  AGENTS.md  >  USER.md  >  TOOLS.md
-   │            │            │           │
-   └── 人格     └── 身份     └── 用户    └── 工具
-```
+current-source 还区分 Agent Workspace 与 Effective Project Workspace：
 
----
+| 状态 | Owner |
+|---|---|
+| SOUL.md / USER.md / memory/ | Agent Workspace |
+| Workspace Skills / Plugins | Agent Workspace |
+| Project AGENTS.md | Project Workspace |
+| 相对文件路径 / Shell cwd | Project Workspace |
+| Session JSONL | Runtime data directory / workspace namespace |
+
+这是多 Project 场景下理解 Context 与文件权限的基础。
 
 ## 6.9 常见问题排错
 
@@ -891,4 +730,4 @@ nanobot
 
 ---
 
-> **下一章**：[07 - 记忆系统实战](../07-memory-system/README.md) —— 深入理解 Nanobot 的双层记忆架构
+> **下一章**：[07 - 记忆系统实战](../07-memory-and-dream/README.md) —— 深入理解 Nanobot 的双层记忆架构
