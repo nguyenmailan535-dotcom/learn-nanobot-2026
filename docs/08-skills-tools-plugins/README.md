@@ -1,7 +1,7 @@
 # 08 - 技能与工具
 
 > **阅读时间**：约 2 小时  
-> **前置知识**：[07 - 记忆系统实战](../07-memory-system/README.md)  
+> **前置知识**：[07 - 记忆系统实战](../07-memory-and-dream/README.md)  
 > **学习目标**：掌握 Nanobot 的 Skill 系统、内置工具体系、MCP 工具集成，能够自定义 Skill
 
 ---
@@ -148,72 +148,83 @@ metadata: '{"nanobot.requires.bins": ["git", "gh"], "nanobot.requires.env": ["GI
 
 ### 8.3.1 必填字段
 
-| 字段 | 类型 | 说明 | 示例 |
-|------|------|------|------|
-| `name` | string | 技能的唯一标识符 | `"github"` |
-| `description` | string | 技能的简短描述（用于摘要展示） | `"GitHub 仓库管理"` |
+current `SkillsLoader` 会验证 Agent Skills identity：
+
+| 字段 | 说明 |
+|---|---|
+| `name` | 必须与 Skill 目录名一致，满足命名规则 |
+| `description` | 1-1024 字符，用于 Skill Summary / Discovery |
+
+最小示例：
+
+```yaml
+---
+name: literature-analysis
+description: Analyze research papers with evidence-first retrieval and citations.
+---
+```
 
 ### 8.3.2 可选字段
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `always` | bool | `false` | 是否每轮对话都全文注入 System Prompt |
-| `metadata` | string (JSON) | `null` | 技能的元数据，包括依赖检查 |
+current-source 支持 Nanobot/OpenClaw compatibility metadata。例如：
+
+```yaml
+---
+name: github
+description: Interact with GitHub using the gh CLI.
+metadata:
+  nanobot:
+    emoji: "🐙"
+    requires:
+      bins: ["gh"]
+      env: []
+---
+```
+
+常见 metadata：
+
+- `requires.bins`：依赖的本地命令；
+- `requires.env`：依赖的环境变量；
+- `always`：Nanobot-specific always-active 语义；
+- 安装提示 / emoji 等 UI metadata。
 
 ### 8.3.3 always 字段详解
 
-```yaml
-# always: true → 每轮对话都将 SKILL.md 全文注入 System Prompt
-# 适用于：Agent 核心能力，必须时刻知道的技能
-always: true
-
-# always: false（默认）→ 仅注入摘要，需要时 Agent 主动 read_file 查看全文
-# 适用于：偶尔使用的技能，节省 token
-always: false
-```
-
-**设计权衡**：
-
-```
-always: true
-├── 优点：Agent 始终知道完整技能内容
-├── 缺点：消耗更多 token
-└── 适用：核心技能（1-2个）
-
-always: false
-├── 优点：节省 token（仅注入一行摘要）
-├── 缺点：Agent 需要额外步骤读取全文
-└── 适用：大多数技能
-```
-
-### 8.3.4 metadata 字段详解
-
-metadata 是一个 JSON 字符串，用于声明技能的依赖：
+current loader 为兼容旧 Skill，同时识别：
 
 ```yaml
-metadata: '{"nanobot.requires.bins": ["git", "gh"], "nanobot.requires.env": ["GITHUB_TOKEN"]}'
+always: true
 ```
 
-| 元数据 Key | 说明 | 示例 |
-|------------|------|------|
-| `nanobot.requires.bins` | 需要的系统命令 | `["git", "gh", "docker"]` |
-| `nanobot.requires.env` | 需要的环境变量 | `["GITHUB_TOKEN", "AWS_KEY"]` |
+以及：
 
-**依赖检查流程**：
-
+```yaml
+metadata:
+  nanobot:
+    always: true
 ```
-技能加载时：
-1. 检查 nanobot.requires.bins
-   → 遍历列表，对每个 bin 执行 which <bin>
-   → 如果命令不存在，打印警告但不阻止加载
 
-2. 检查 nanobot.requires.env
-   → 遍历列表，检查 os.environ.get(<env>)
-   → 如果环境变量未设置，打印警告
+但不要滥用。
 
-注意：依赖缺失不会阻止技能加载，只会打印警告。
-技能可能在运行时因依赖缺失而失败，此时 Agent 会收到错误信息并处理。
+```text
+always=true
+→ Full Skill Instructions 每轮活跃
+→ Context token 增长
+→ Instruction collision 风险增长
 ```
+
+大多数 Skill 更适合默认按需加载。
+
+### 8.3.4 metadata 与依赖检查
+
+`SkillsLoader` 会读取 `metadata.nanobot.requires`，检查：
+
+```text
+bins → shutil.which()
+env  → os.environ
+```
+
+依赖不满足的 Skill 可以出现在 Summary 中，但标记 unavailable，使 Agent 知道为什么当前不能用。
 
 ---
 
@@ -221,56 +232,73 @@ metadata: '{"nanobot.requires.bins": ["git", "gh"], "nanobot.requires.env": ["GI
 
 ### 8.4.1 搜索路径
 
-Nanobot 在两个位置搜索技能：
+current-source 有三类来源：
 
-```
-搜索顺序（优先级从高到低）：
-1. <workspace>/skills/      ← 用户自定义技能（优先）
-2. nanobot/skills/          ← 内置技能（包内预置）
-
-同名技能：workspace 覆盖内置
+```text
+<workspace>/skills/             # Workspace Skills
+<workspace>/plugins/*/skills/   # Enabled Agent Plugin Skills
+nanobot/skills/                 # Built-in Skills
 ```
 
 ### 8.4.2 发现流程
 
-```python
-# 简化的技能发现逻辑
-def discover_skills(workspace: str) -> dict:
-    skills = {}
-    
-    # 1. 先加载内置技能
-    builtin_skills_dir = os.path.join(NANOBOT_PACKAGE_DIR, "skills")
-    for skill_dir in os.listdir(builtin_skills_dir):
-        skill = load_skill(os.path.join(builtin_skills_dir, skill_dir))
-        if skill:
-            skills[skill.name] = skill
-    
-    # 2. 再加载 workspace 技能（同名覆盖内置）
-    workspace_skills_dir = os.path.join(workspace, "skills")
-    if os.path.exists(workspace_skills_dir):
-        for skill_dir in os.listdir(workspace_skills_dir):
-            skill = load_skill(os.path.join(workspace_skills_dir, skill_dir))
-            if skill:
-                skills[skill.name] = skill  # 覆盖同名内置技能
-    
-    return skills
+```text
+Workspace Skills
+    ↓
+Enabled Agent Plugin Skills
+    ↓
+Built-in Skills
+    ↓
+disabledSkills filter
+    ↓
+requirements filter
+    ↓
+Skills Summary / Active Skills
 ```
 
 ### 8.4.3 覆盖机制
 
-这个设计允许用户定制内置技能：
+current `list_skills()` 使用 `seen_names`，所以优先级可理解为：
 
-```
-内置 github 技能：
-nanobot/skills/github/SKILL.md  → "使用 gh 命令管理 GitHub"
-
-用户自定义覆盖：
-workspace/skills/github/SKILL.md  → "使用 GitHub API 管理，需要审批流程"
-
-最终生效：用户自定义版本
+```text
+Workspace > Enabled Plugin > Built-in
 ```
 
-> 💡 **面试要点**：这种"约定优于配置 + 同名覆盖"的设计模式，在很多框架中都能看到（如 Maven 的 Convention over Configuration，Webpack 的 resolve 策略）。
+这允许你在 Workspace 中用同名 Skill 覆盖系统默认，而不用修改安装包源码。
+
+### 8.4.4 Agent Plugin 是 current 新边界
+
+current `nanobot/agent/plugins.py` 支持 Agent Plugins v1。
+
+典型：
+
+```text
+workspace/plugins/research-agent/
+├── plugin.json
+├── mcp.json
+└── skills/
+    └── literature-analysis/
+        └── SKILL.md
+```
+
+Plugin 可以把：
+
+```text
+Skill instructions
++
+MCP capabilities
+```
+
+一起安装和启用。
+
+current loader 还会：
+
+- 校验 manifest/schema；
+- 做 path containment；
+- 对 package 内容做 fingerprint；
+- 区分 installed 与 enabled。
+
+> 💡 **安全思想**：用户授权的是某个被审查过的 capability package，不是“这个目录名以后无论被替换成什么都继续信任”。
 
 ---
 
@@ -278,425 +306,171 @@ workspace/skills/github/SKILL.md  → "使用 GitHub API 管理，需要审批�
 
 ### 8.5.1 为什么需要渐进披露
 
-如果有 20 个技能，每个 SKILL.md 有 500 行，全部注入 System Prompt 就是 10000 行——这会：
+如果 30 个 Skill 每个几千字全部进入 System Prompt：
 
-1. 消耗大量 token（费钱）
-2. 分散 Agent 注意力（效果差）
-3. 可能超出上下文窗口（直接报错）
+```text
+大量 Token
++ 无关指令干扰
++ Prompt Cache 失效概率上升
+```
+
+所以 current-source 默认先使用 Summary。
 
 ### 8.5.2 三层渐进披露设计
 
+可以继续沿用原教程的三层理解，但 current 实现更具体：
+
+**Level 1：Discovery Metadata**
+
+`build_skills_summary()` 给出：
+
+```text
+name
+description
+safe display path
+availability
 ```
-Tier 1: 摘要目录（始终注入）
-─────────────────────────────
-所有技能的 name + description 组成的摘要列表
-消耗：约 100-500 tokens
 
-示例注入内容：
-"你拥有以下技能：
- - github: GitHub 仓库管理、PR 创建与代码审查
- - weather: 查询全球天气信息
- - summarize: 长文本智能摘要
- - tmux: 终端多窗口管理
- 如需使用某个技能，请先读取对应的 SKILL.md 了解详情。"
+**Level 2：Active / Explicit Skill Body**
 
-       │
-       │ 当 Agent 判断需要使用某个技能时
-       ▼
+用户可以显式：
 
-Tier 2: 读取 SKILL.md 全文（按需加载）
-─────────────────────────────
-Agent 主动调用 read_file 读取完整 SKILL.md
-消耗：按需，约 200-1000 tokens
-
-Agent 内部思考：
-"用户想管理 GitHub PR，我需要查看 github 技能的详细说明"
-[调用工具: read_file]
-[路径: skills/github/SKILL.md]
-
-       │
-       │ 如果需要更详细的参考资料或脚本
-       ▼
-
-Tier 3: 访问 scripts/references（深度使用）
-─────────────────────────────
-Agent 读取辅助脚本或参考文档
-消耗：按需
-
-[调用工具: read_file]
-[路径: skills/github/references/pr-workflow.md]
-[调用工具: exec]
-[命令: bash skills/github/scripts/create-pr.sh]
+```text
+$literature-analysis
 ```
+
+`SkillsLoader.build_explicit_skill_runtime_context()` 会把完整 Skill Body 作为本 Turn 的 RuntimeContextBlock 注入。
+
+**Level 3：Skill References / Bundled Resources**
+
+复杂 Skill 可以把详细材料放在 references/scripts/assets 中，SKILL.md 保持核心工作流简洁，并在需要时让 Agent 读取对应文件。
 
 ### 8.5.3 always: true 的特殊处理
 
-标记为 `always: true` 的技能跳过渐进披露，直接全文注入：
+`get_always_skills()` 会在满足 requirements 时返回 always Skill。
 
+适合：
+
+- 每轮都必须遵守的极少量工作协议；
+- 极短、稳定的核心约束。
+
+不适合：
+
+- 长文档；
+- 偶尔使用的工具教程；
+- 大量领域知识。
+
+### 8.5.4 显式 Skill 调用
+
+current-source 支持 `$skill-name`。
+
+例如：
+
+```text
+Use $literature-analysis to compare these three papers.
 ```
-技能注入逻辑：
-┌──────────────────┐
-│ 遍历所有技能      │
-└──────────────────┘
-       │
-       ├── always: true → 全文注入 System Prompt
-       │
-       └── always: false → 仅注入 name + description 摘要
-```
 
-> 💡 **面试加分**：渐进披露是 UI/UX 设计中的经典原则——先展示概要，让用户按需深入。Nanobot 将这个原则应用到了 Agent Prompt 设计中，是一种优雅的 token 管理策略。
+相比让模型自己猜 Skill，这种方式：
 
----
+- 可控；
+- 方便测试；
+- 适合做 A/B Eval。
 
 ## 8.6 内置技能列表
 
-Nanobot 预置了以下技能：
+Built-in Skills 会随 current-source 演进，不建议背一个固定“完整列表”。
 
-| 技能名 | 功能 | always | 依赖 |
-|--------|------|--------|------|
-| `github` | GitHub 仓库管理、PR、Issue | false | `git`, `gh`, `GITHUB_TOKEN` |
-| `weather` | 全球天气查询 | false | 无 |
-| `summarize` | 长文本智能摘要 | false | 无 |
-| `tmux` | 终端多窗口管理 | false | `tmux` |
-| `clawhub` | ClawHub 平台集成 | false | 无 |
-| `skill-creator` | 帮助用户创建新技能 | false | 无 |
+2026-09-24 源码中可见的代表包括：
 
-### 各技能详解
+| Skill | 用途 |
+|---|---|
+| `cron` | 定时提醒/任务 |
+| `github` | 使用 `gh` CLI |
+| `memory` | 搜索 history log |
+| `image-generation` | 图像生成工作流 |
+| `skill-creator` | 创建/维护 Agent Skills |
+| `summarize` | URL/文件/视频摘要 |
+| `clawhub` | 搜索/安装公共 Skill |
+| `my` | Runtime 自检/自省 |
 
-**github 技能**：
+真正运行时请用：
 
-```markdown
-能力：
-- 克隆/创建/管理仓库
-- 创建/审查/合并 Pull Request
-- 管理 Issue 和 Labels
-- 查看 Actions 运行状态
-
-依赖：
-- git CLI 工具
-- GitHub CLI (gh)
-- GITHUB_TOKEN 环境变量
+```text
+/skill
 ```
 
-**weather 技能**：
-
-```markdown
-能力：
-- 查询全球城市天气
-- 天气预报
-- 温度/湿度/风速等详细信息
-
-实现方式：
-- 通过 web_search 或 web_fetch 查询天气 API
-```
-
-**summarize 技能**：
-
-```markdown
-能力：
-- 长文档摘要
-- 网页内容提取与总结
-- 多文档对比摘要
-
-使用场景：
-- 用户提供长篇文章需要总结
-- 需要从多个来源提取关键信息
-```
-
-**skill-creator 技能**：
-
-```markdown
-能力：
-- 引导用户创建新的自定义技能
-- 生成 SKILL.md 模板
-- 检查技能目录结构
-
-这是一个"元技能"——用来创建其他技能的技能。
-```
+或 `SkillsLoader.list_skills()` 查看当前安装版本。
 
 ---
 
 ## 8.7 内置工具完整列表
 
-### 8.7.1 工具总览表
+### 8.7.1 工具总览
 
-| 类别 | 工具名 | 功能 | 关键特性 |
-|------|--------|------|---------|
-| **文件** | `read_file` | 读取文件内容 | 支持二进制文件 base64、支持行范围 |
-| **文件** | `write_file` | 创建/覆盖文件 | 自动创建父目录 |
-| **文件** | `edit_file` | 编辑文件局部内容 | 基于搜索替换，比 write_file 精确 |
-| **文件** | `list_dir` | 列出目录内容 | 支持递归、支持过滤 |
-| **Shell** | `exec` | 执行 Shell 命令 | asyncio 异步执行、危险命令拒绝 |
-| **Web** | `web_search` | 网络搜索 | 支持 Brave/DDG/Tavily 等引擎 |
-| **Web** | `web_fetch` | 获取网页内容 | HTML 转纯文本 |
-| **通信** | `message` | 发送消息给用户 | 唯一可携带 media 的工具 |
-| **调度** | `cron` | 定时任务管理 | add/list/remove 三种操作 |
-| **并发** | `spawn` | 启动后台子代理 | SubagentManager 管理 |
+current Tool 同样是 discovery-driven，不要把教程中的表当永久闭集。
+
+主要类别：
+
+```text
+Filesystem
+Shell
+Search / Web
+MCP
+Cron / Automations
+Subagent
+Long-running Task / Goal
+Image Generation
+Notebook / Patch
+Runtime Self-inspection
+Message / Delivery
+```
 
 ### 8.7.2 文件操作工具
 
-**read_file —— 读取文件**
+重点不是名字，而是理解安全边界：
 
-```json
-{
-  "name": "read_file",
-  "parameters": {
-    "path": "string (必需) - 文件路径",
-    "start_line": "int (可选) - 起始行号",
-    "end_line": "int (可选) - 结束行号"
-  }
-}
-```
-
-使用示例：
-
-```
-Agent: [调用 read_file]
-参数: {"path": "src/main.py"}
-返回: "import os\nimport sys\n\ndef main():\n    print('Hello')\n..."
-```
-
-**write_file —— 写入文件**
-
-```json
-{
-  "name": "write_file",
-  "parameters": {
-    "path": "string (必需) - 文件路径",
-    "content": "string (必需) - 文件内容"
-  }
-}
-```
-
-关键行为：
-- 如果文件不存在，自动创建（包括父目录）
-- 如果文件已存在，**完全覆盖**
-- 受 `restrict_to_workspace` 限制
-
-**edit_file —— 编辑文件**
-
-```json
-{
-  "name": "edit_file",
-  "parameters": {
-    "path": "string (必需) - 文件路径",
-    "old_text": "string (必需) - 要替换的原文本",
-    "new_text": "string (必需) - 替换后的新文本"
-  }
-}
-```
-
-关键行为：
-- 基于精确字符串匹配定位修改位置
-- 比 write_file 更安全（不会意外覆盖整个文件）
-- 如果 old_text 找不到匹配，返回错误
-
-**list_dir —— 列出目录**
-
-```json
-{
-  "name": "list_dir",
-  "parameters": {
-    "path": "string (必需) - 目录路径",
-    "recursive": "bool (可选) - 是否递归",
-    "pattern": "string (可选) - 过滤模式"
-  }
-}
-```
+- effective Project Workspace；
+- `tools.restrictToWorkspace`；
+- file state tracking；
+- read/write/edit/patch/search 各自 contract。
 
 ### 8.7.3 Shell 执行工具
 
-**exec —— 执行命令**
+Shell Tool 受：
 
-```json
-{
-  "name": "exec",
-  "parameters": {
-    "command": "string (必需) - Shell 命令"
-  }
-}
-```
+- enable/disable；
+- Working Directory；
+- Restrict-to-Workspace guard；
+- dangerous pattern checks；
+- optional OS sandbox；
+- allowed env keys；
 
-核心实现特性：
-
-```python
-# 简化的 exec 工具实现
-async def exec_tool(command: str, workspace: str) -> str:
-    # 1. 危险命令检测
-    if is_dangerous_command(command):
-        return "Error: This command is potentially dangerous and has been blocked."
-    
-    # 2. 使用 asyncio 异步执行
-    process = await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=workspace  # 在 workspace 目录下执行
-    )
-    
-    stdout, stderr = await process.communicate()
-    
-    # 3. 返回结果
-    return f"Exit code: {process.returncode}\n{stdout.decode()}\n{stderr.decode()}"
-```
-
-**危险命令拒绝机制**：
-
-```python
-DANGEROUS_PATTERNS = [
-    r"rm\s+-rf\s+/",        # 删除根目录
-    r"mkfs\.",               # 格式化磁盘
-    r"dd\s+if=",             # 磁盘写入
-    r">\s*/dev/sd",          # 写入磁盘设备
-    r"chmod\s+-R\s+777\s+/", # 全局权限修改
-]
-
-def is_dangerous_command(command: str) -> bool:
-    for pattern in DANGEROUS_PATTERNS:
-        if re.search(pattern, command):
-            return True
-    return False
-```
-
-**SSRF 防护**：
-
-exec 工具中如果涉及网络请求，会检查目标地址是否为内网：
-
-```python
-BLOCKED_HOSTS = [
-    "127.0.0.1", "localhost",
-    "169.254.169.254",  # AWS 元数据服务
-    "10.0.0.0/8",       # 内网 A 类
-    "172.16.0.0/12",    # 内网 B 类
-    "192.168.0.0/16",   # 内网 C 类
-]
-```
+共同治理。
 
 ### 8.7.4 Web 工具
 
-**web_search —— 网络搜索**
+Web Search / Fetch 还受：
 
-```json
-{
-  "name": "web_search",
-  "parameters": {
-    "query": "string (必需) - 搜索关键词",
-    "num_results": "int (可选) - 返回结果数量"
-  }
-}
-```
+- provider config；
+- URL policy；
+- SSRF guard；
+- private address whitelist；
 
-支持多个搜索引擎：
-
-| 引擎 | 说明 | 需要 API Key |
-|------|------|-------------|
-| Brave Search | 隐私搜索引擎 | 是 |
-| DuckDuckGo | 免费搜索 | 否 |
-| Tavily | AI 优化的搜索 | 是 |
-| SearXNG | 自托管搜索聚合 | 否 |
-
-配置方式：
-
-```json
-{
-  "tools": {
-    "web_search": {
-      "provider": "brave",
-      "api_key": "BSAxxxxxxxx"
-    }
-  }
-}
-```
-
-**web_fetch —— 获取网页**
-
-```json
-{
-  "name": "web_fetch",
-  "parameters": {
-    "url": "string (必需) - 网页 URL"
-  }
-}
-```
-
-核心功能：将 HTML 页面转换为纯文本，方便 Agent 阅读。
-
-```
-输入: "https://example.com/article"
-
-处理流程:
-1. HTTP GET 请求获取 HTML
-2. 解析 HTML，提取正文
-3. 移除脚本、样式、导航等无关元素
-4. 转换为清晰的纯文本格式
-5. SSRF 防护：拒绝内网地址
-
-输出: "文章标题\n\n文章正文内容..."
-```
+约束。
 
 ### 8.7.5 通信工具
 
-**message —— 发送消息**
-
-```json
-{
-  "name": "message",
-  "parameters": {
-    "content": "string (必需) - 消息内容",
-    "media": "array (可选) - 媒体附件"
-  }
-}
-```
-
-关键特性：
-- 这是 Agent 主动向用户发送消息的唯一方式
-- 对应 `OutboundMessage` 数据结构
-- **唯一可以携带 media（图片/文件）的工具**
-
-```python
-# OutboundMessage 数据结构
-@dataclass
-class OutboundMessage:
-    channel: str      # 目标通道
-    chat_id: str      # 目标会话
-    content: str      # 文本内容
-    reply_to: str     # 回复的消息 ID（可选）
-    metadata: dict    # 元数据
-    media: list       # 媒体附件列表（图片、文件等）
-```
+普通最终回复通过 TurnDelivery/Channel；Message Tool 用于需要显式发送某些消息或媒体的场景。
 
 ### 8.7.6 调度工具
 
-**cron —— 定时任务**
+current `cron` Tool 支持 reminder/task/one-time 等模式，底层是 workspace-scoped `CronService`。
 
-```json
-{
-  "name": "cron",
-  "parameters": {
-    "action": "string (必需) - add/list/remove",
-    "name": "string (action=add/remove时必需) - 任务名称",
-    "schedule": "object (action=add时必需) - 调度配置",
-    "message": "string (action=add时必需) - 触发时发送的消息"
-  }
-}
-```
-
-详见 [10 - 子Agent与定时任务](../10-subagent-and-cron/README.md)。
+Heartbeat 是 Gateway 管理的 protected system cron job，不是普通用户 Cron 的别名。
 
 ### 8.7.7 并发工具
 
-**spawn —— 启动子代理**
-
-```json
-{
-  "name": "spawn",
-  "parameters": {
-    "task": "string (必需) - 子代理的任务描述"
-  }
-}
-```
-
-详见 [10 - 子Agent与定时任务](../10-subagent-and-cron/README.md)。
+Subagent Tool 通过 `SubagentManager` 创建 background/inline execution；current 默认最大并发 Subagent 数为 4，可配置。
 
 ---
 
@@ -704,228 +478,128 @@ class OutboundMessage:
 
 ### 8.8.1 ToolRegistry 架构
 
-ToolRegistry 是 Nanobot 工具系统的核心枢纽，负责统一管理所有工具的注册、发现和执行：
-
-```
-┌─────────────────────────────────────────────────┐
-│                 ToolRegistry                     │
-│                                                  │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────┐   │
-│  │ 内置工具  │  │ MCP 工具  │  │ 自定义工具    │   │
-│  │          │  │          │  │              │   │
-│  │ read_file│  │ mcp_xxx  │  │ custom_tool  │   │
-│  │ exec     │  │ mcp_yyy  │  │              │   │
-│  │ ...      │  │ ...      │  │              │   │
-│  └──────────┘  └──────────┘  └──────────────┘   │
-│        │              │              │           │
-│        └──────────────┼──────────────┘           │
-│                       │                          │
-│              ┌────────▼────────┐                 │
-│              │  统一执行入口    │                 │
-│              │  execute(name,  │                 │
-│              │    arguments)   │                 │
-│              └─────────────────┘                 │
-└─────────────────────────────────────────────────┘
+```text
+Tool Sources
+├── Built-in ToolLoader
+├── Plugin Entry Points
+└── MCPProvider
+        ↓
+   ToolRegistry
+        ↓
+get_definitions()
+        ↓
+AgentRunner / Provider
+        ↓
+Tool Call
+        ↓
+execute(name, args)
 ```
 
 ### 8.8.2 注册流程
 
-```python
-# 简化的 ToolRegistry 实现
-class ToolRegistry:
-    def __init__(self):
-        self._tools: dict[str, ToolDefinition] = {}
-    
-    def register(self, name: str, definition: dict, handler: Callable):
-        """注册一个工具"""
-        self._tools[name] = ToolDefinition(
-            name=name,
-            definition=definition,  # JSON Schema 格式的工具定义
-            handler=handler          # 实际执行函数
-        )
-    
-    def get_definitions(self) -> list:
-        """获取所有工具定义（用于发送给 LLM）"""
-        return [
-            {
-                "type": "function",
-                "function": tool.definition
-            }
-            for tool in self._tools.values()
-        ]
-    
-    async def execute(self, name: str, arguments: dict) -> str:
-        """执行一个工具调用"""
-        if name not in self._tools:
-            return f"Error: Unknown tool '{name}'"
-        
-        tool = self._tools[name]
-        try:
-            result = await tool.handler(**arguments)
-            return str(result)
-        except Exception as e:
-            return f"Error: {str(e)}"
+AgentLoop 的默认 Tool 通过：
+
+```text
+ToolContext
+→ ToolLoader.load()
+→ ToolRegistry.register()
 ```
+
+MCP Tool 则由 application-owned `MCPProvider` 连接后动态注册到同一个 Registry。
 
 ### 8.8.3 执行流程
 
-```
-LLM 返回工具调用请求
-    │
-    ▼
-┌──────────────────────┐
-│ 解析 tool_calls       │
-│ name: "read_file"     │
-│ arguments: {"path":   │
-│   "src/main.py"}      │
-└──────────────────────┘
-    │
-    ▼
-┌──────────────────────┐
-│ ToolRegistry.execute  │
-│ 1. 查找注册的 handler │
-│ 2. 验证参数           │
-│ 3. 执行 handler       │
-│ 4. 返回结果           │
-└──────────────────────┘
-    │
-    ▼
-┌──────────────────────┐
-│ 将结果作为 tool       │
-│ message 返回给 LLM    │
-│ role: "tool"          │
-│ content: "文件内容..." │
-└──────────────────────┘
-    │
-    ▼
-LLM 基于工具结果继续推理
+AgentRunner 不需要知道能力来自哪一层：
+
+```text
+tool_call.name
+→ ToolRegistry lookup
+→ validation / execution
+→ result governance
+→ Tool Result Message
+→ Provider next iteration
 ```
 
 ### 8.8.4 工具定义的 JSON Schema 格式
 
-所有工具都遵循 OpenAI 的 Function Calling 格式：
+模型看到的是稳定的 Tool Contract：
 
 ```json
 {
-  "type": "function",
-  "function": {
-    "name": "read_file",
-    "description": "Read the contents of a file",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "The path to the file to read"
-        },
-        "start_line": {
-          "type": "integer",
-          "description": "Optional start line number"
-        },
-        "end_line": {
-          "type": "integer",
-          "description": "Optional end line number"
-        }
-      },
-      "required": ["path"]
-    }
+  "name": "search_papers",
+  "description": "Search the indexed paper corpus.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {"type": "string"},
+      "top_k": {"type": "integer"}
+    },
+    "required": ["query"]
   }
 }
 ```
+
+Tool Schema 是 model-facing API，改字段名/描述也可能改变模型 Tool Selection。
 
 ---
 
 ## 8.9 MCP 工具集成
 
-### 8.9.1 MCPToolWrapper
+### 8.9.1 MCPProvider
 
-Nanobot 通过 `MCPToolWrapper` 将 MCP Server 提供的工具"包装"为内置工具格式，实现无缝集成：
+current-source 的连接 owner 是 `MCPProvider`，不是旧教程中 AgentLoop 内部固定的 MCP wrapper list。
 
-```
-MCP Server                    Nanobot
-┌──────────────┐             ┌──────────────────────┐
-│ tools/list   │ ──────────→ │ MCPToolWrapper       │
-│              │             │ 转换为内置工具格式     │
-│ tools/call   │ ←────────── │ 注册到 ToolRegistry   │
-└──────────────┘             └──────────────────────┘
+```text
+Config / Agent Plugin
+→ MCPProvider.connect()
+→ discover tools/resources/prompts
+→ enabledTools filter
+→ wrappers
+→ shared ToolRegistry
 ```
 
 ### 8.9.2 转换过程
 
-```python
-# 简化的 MCPToolWrapper 实现
-class MCPToolWrapper:
-    def __init__(self, mcp_client):
-        self.client = mcp_client
-    
-    async def wrap_tools(self, registry: ToolRegistry):
-        """将 MCP 工具转换并注册到 ToolRegistry"""
-        # 1. 获取 MCP 工具列表
-        mcp_tools = await self.client.list_tools()
-        
-        for mcp_tool in mcp_tools:
-            # 2. 转换工具定义格式
-            definition = {
-                "name": f"mcp_{mcp_tool.name}",
-                "description": mcp_tool.description,
-                "parameters": mcp_tool.input_schema
-            }
-            
-            # 3. 创建执行代理函数
-            async def handler(**kwargs):
-                result = await self.client.call_tool(
-                    mcp_tool.name, kwargs
-                )
-                return result.content
-            
-            # 4. 注册到 ToolRegistry
-            registry.register(
-                name=f"mcp_{mcp_tool.name}",
-                definition=definition,
-                handler=handler
-            )
-```
+MCP Tool 的 JSON Schema 会经过 adapter 变成 Nanobot Tool contract，最终对 AgentRunner 与 Native Tool 保持统一。
 
 ### 8.9.3 MCP 工具的命名规范
 
-MCP 工具在注册时会添加前缀以避免命名冲突：
-
-```
-MCP Server 原始工具名:  get_weather
-注册到 ToolRegistry:   mcp_get_weather
-
-MCP Server 原始工具名:  search_docs
-注册到 ToolRegistry:   mcp_search_docs
-```
+Server capability 会映射为避免冲突的 wrapped name。实际名字应以连接日志和 ToolRegistry 为准，不要依赖旧教程中固定拼接规则。
 
 ### 8.9.4 配置 MCP Server
 
-在 config.json 中配置 MCP Server：
+current `~/.nanobot/config.json`：
 
 ```json
 {
-  "mcp": {
-    "servers": {
-      "weather": {
+  "tools": {
+    "mcpServers": {
+      "filesystem": {
         "command": "npx",
-        "args": ["-y", "@weather/mcp-server"],
-        "env": {
-          "API_KEY": "xxx"
-        }
-      },
-      "database": {
-        "command": "python",
-        "args": ["-m", "db_mcp_server"],
-        "env": {
-          "DB_URL": "postgresql://localhost/mydb"
-        }
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/safe/path"],
+        "enabledTools": ["read_file"]
       }
     }
   }
 }
 ```
 
----
+WebUI 也可以在 Apps 页面添加 MCP。
+
+### 8.9.5 Agent Plugin：Skill + MCP 打包
+
+对 ResearchPilot，推荐最终结构：
+
+```text
+research-plugin/
+├── plugin.json
+├── mcp.json
+└── skills/
+    └── literature-analysis/
+        └── SKILL.md
+```
+
+Skill 进入 Context，MCP Tool 进入 ToolRegistry；Plugin 只是二者的安装/授权边界。
 
 ## 8.10 自定义 Skill 编写实战
 
@@ -1118,54 +792,50 @@ always: false
 
 ## 8.11 工具安全机制
 
-### 8.11.1 restrict_to_workspace
+### 8.11.1 restrictToWorkspace
 
-所有文件操作工具（read_file, write_file, edit_file, list_dir）都受 workspace 限制：
+current config：
 
-```python
-def validate_path(path: str, workspace: str) -> str:
-    """确保路径在 workspace 范围内"""
-    abs_path = os.path.abspath(os.path.join(workspace, path))
-    abs_workspace = os.path.abspath(workspace)
-    
-    if not abs_path.startswith(abs_workspace):
-        raise PermissionError(
-            f"Access denied: {path} is outside workspace"
-        )
-    
-    return abs_path
+```text
+tools.restrictToWorkspace
 ```
+
+这是 **application-level workspace guard**，限制文件 Tool 与 Shell Working Directory 等访问边界。
+
+它不是 OS sandbox。
 
 ### 8.11.2 exec 工具的安全层
 
-```
-用户命令 → 危险模式检测 → SSRF 检测 → 路径限制 → 执行
-    │            │              │            │         │
-    │         拒绝危险命令    拒绝内网访问   限制cwd   异步执行
-    │         (rm -rf /)      (127.0.0.1)  (workspace)
-    │
-    └── 如果 exec.allowed = false，直接拒绝所有命令
-```
+current 推荐生产环境叠加：
 
-### 8.11.3 web_fetch 的 SSRF 防护
-
-```python
-def is_ssrf_target(url: str) -> bool:
-    """检查 URL 是否指向内网地址"""
-    from urllib.parse import urlparse
-    import ipaddress
-    
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-    
-    try:
-        ip = ipaddress.ip_address(hostname)
-        return ip.is_private or ip.is_loopback or ip.is_reserved
-    except ValueError:
-        return hostname in ("localhost", "metadata.google.internal")
+```text
+tools.restrictToWorkspace = true
++
+tools.exec.sandbox = "bwrap"     # Linux
+或 "seatbelt"                    # macOS
 ```
 
----
+Windows 没有 bwrap；应保持 Workspace Restriction，并谨慎决定是否开放 Shell。
+
+### 8.11.3 web_fetch / HTTP MCP 的 SSRF 防护
+
+HTTP Web Fetch 与 HTTP/SSE MCP 都使用 SSRF 防护。
+
+私有地址如果确实需要访问，只加入窄范围：
+
+```text
+tools.ssrfWhitelist
+```
+
+不要为了调通直接放开整个私网段。
+
+### 8.11.4 最小工具权限
+
+MCP Server 使用 `enabledTools`；Session 也可以有 disabled tools policy。
+
+原则：
+
+> Server/Runtime “能提供”什么，不等于某个 Agent/Session “应该拥有”什么。
 
 ## 8.12 面试高频题
 
@@ -1275,4 +945,4 @@ def is_ssrf_target(url: str) -> bool:
 
 ---
 
-> **下一章**：[09 - 多平台接入](../09-multi-platform/README.md) —— 了解 Nanobot 如何同时接入 Telegram、Discord、飞书、钉钉等 8+ 平台
+> **下一章**：[09 - 多平台接入](../09-mcp-integration/README.md) —— 了解 Nanobot 如何同时接入 Telegram、Discord、飞书、钉钉等 8+ 平台
