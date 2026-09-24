@@ -331,4 +331,4 @@ Nanobot current-source
 
 ---
 
-> 📝 **本章小结**：Nanobot 是一个"极简但完整"的 AI Agent 框架。它用 早期约 4000 行、current-source 已显著扩展代码证明了：好的架构设计不在于代码多少，而在于是否抓住了问题的本质。对面试者而言，Nanobot 是一个"以小见大"的完美学习素材。
+> 📝 **本章小结**：Nanobot 早期以“极简但完整”著称，current-source 已经成长为更完整的 Agent Runtime。今天最值得学习的不是固定代码量，而是 MessageBus、AgentLoop、AgentRunner、Context、Tool、Session、MCP、Memory 与 Gateway 之间清晰的责任边界。
